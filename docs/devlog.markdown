@@ -72,6 +72,63 @@ ALL TESTS PASSED
 
 整条 compute 管线（SSBO 上传 → shader 编译链接 → `glDispatchCompute` → 数据回读）在真实 GPU 上验证通过。
 
-### 下一步（M1）
+## M1 — Tensor 层 + matmul / elementwise 算子
 
-Tensor 层 + matmul + elementwise 算子，并建立「CPU 参考实现 vs OpenGL 实现」的数值 diff 测试框架。
+> 日期：2026-09-30
+> 里程碑：M1
+
+### 目标
+
+在 M0 的 Device 抽象层之上，建立 Tensor 层与首批算子（matmul、relu、add、mul），并用「CPU 参考实现 vs OpenGL 实现」的数值 diff 测试验证正确性。
+
+### 新增结构
+
+```
+include/opendll/tensor.hpp    Tensor 层
+include/opendll/ops.hpp       算子公开接口
+src/tensor.cpp
+src/ops/ops.cpp               后端分发
+src/ops/cpu_ops.cpp           CPU 参考实现
+src/ops/gl_ops.cpp            OpenGL 实现（GLSL + kernel 缓存）
+tests/test_ops.cpp            diff 测试
+```
+
+### 设计要点
+
+- **Tensor**：contiguous float32，轻量句柄 + `shared_ptr<Buffer>` 共享存储，提供 `upload` / `download`。
+- **后端分发**：算子对外统一（`matmul(dev, a, b)`），shape 校验在 `ops.cpp` 统一完成，按 `device.backend` 分发到 `cpu_ops` 或 `gl_ops`。
+- **标量参数走 SSBO**：matmul 的 `M/N/K` 经一个参数 buffer（binding 3）传入，而非 uniform，从而完全复用 `BufferBinding` 机制、无需扩展 dispatch 接口。
+- **kernel 缓存**：同一 device 的 shader 只编译一次（M2 升级为显式算子注册表）。
+- **CPU 参考实现**：经抽象接口 `download` → C++ 循环 → `upload`，作为数值黄金基准。
+
+### 算子清单
+
+| 算子 | 语义 | 实现 |
+| --- | --- | --- |
+| matmul | C = A @ B，2D | GLSL 8×8 local size，naive 三重循环 |
+| relu | y = max(x, 0) | 逐元素 |
+| add | c = a + b | 逐元素 |
+| mul | c = a * b | 逐元素 |
+
+### diff 测试
+
+`tests/test_ops.cpp` 用固定 seed 的随机数据（[-1,1]），对每个算子分别在 CPU 与 OpenGL 后端计算，比较 `max_abs_diff`：
+
+- matmul：64×32 与 32×48，阈值 `1e-3`
+- relu / add / mul：1024 元素，阈值 `1e-4`
+
+### 测试结果
+
+```
+[matmul] max_abs_diff=9.53674e-07 PASS
+[relu]   max_abs_diff=0          PASS
+[add]    max_abs_diff=0          PASS
+[mul]    max_abs_diff=0          PASS
+ALL OPS PASSED
+```
+
+elementwise 精确一致（单次浮点运算无误差），matmul 误差 `9.5e-7` 为 fp32 累加的正常水平。
+
+### 下一步（M2）
+
+完整 ResNet 算子集：conv2d / batchnorm / maxpool / avgpool / linear / softmax-cross-entropy，沿用 CPU↔OpenGL diff 验证。
