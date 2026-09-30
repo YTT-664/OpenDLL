@@ -178,6 +178,71 @@ ALL OPS PASSED
 
 至此 ResNet18/50 所需的 **forward 算子集全部就绪**（共 11 个算子），每个均有 CPU 参考实现 + OpenGL compute shader，统一经 `ops.cpp` 后端分发、随机数据 diff 验证。
 
-### 下一步（M3）
+## M3 — Module 层 + backward + MLP 收敛
 
-Module 层 + 静态计算图 + backward 梯度，搭 MLP 在 CIFAR 收敛。
+> 日期：2026-09-30
+> 里程碑：M3（目标更正为 MLP 在 FashionMNIST 收敛）
+
+### 新增内容
+
+- **backward 算子**：`relu_backward` / `cross_entropy_backward` / `transpose` / `sum_axis0`（CPU + OpenGL，diff 全绿）。
+- **Module 层**：`Module` 基类 + `Linear`（Xavier 初始化、缓存输入、算三份梯度）+ `ReLU`。
+- **优化器**：朴素 `SGD`（`param -= lr*grad`）。
+- **数据加载**：`load_mnist`（IDX 格式，MNIST/FashionMNIST 通用）。
+- **训练程序**：`examples/train_mlp.cpp`。
+
+### 关键设计
+
+`Linear::backward` 复用已有算子组合，未引入专用 backward kernel：
+
+- `grad_input = matmul(grad_out, w)`
+- `grad_w = matmul(transpose(grad_out), x)`
+- `grad_b = sum_axis0(grad_out)`
+
+静态计算图按「cross_entropy_backward → fc2 → relu → fc1」逆序手动回传。
+
+### 收敛结果（FashionMNIST，784→128→ReLU→10，batch 64）
+
+```
+epoch 0  loss=0.584  test_acc=82.33%
+epoch 1  loss=0.424  test_acc=83.25%
+epoch 2  loss=0.383  test_acc=83.98%
+epoch 3  loss=0.358  test_acc=84.50%
+epoch 4  loss=0.339  test_acc=84.92%
+epoch 5  loss=0.324  test_acc=85.13%
+epoch 6  loss=0.311  test_acc=85.35%
+epoch 7  loss=0.300  test_acc=86.00%
+epoch 8  loss=0.290  test_acc=85.82%
+epoch 9  loss=0.282  test_acc=86.05%
+```
+
+loss 单调下降、测试准确率单调上升至 86%，反向传播梯度正确。
+
+## GPU 独显调用测试
+
+> 日期：2026-09-30
+
+### 环境
+
+| GPU | 类型 | 显存 | 驱动 |
+| --- | --- | --- | --- |
+| Intel Arc Graphics | 集显（iGPU） | 2GB | 32.0.101.8132 |
+| NVIDIA RTX 4060 Laptop | 独显 | 4GB | 32.0.15.6624（R566.24） |
+
+### 测试过程与结论
+
+1. 默认 OpenGL 上下文走 **Intel Arc 集显**（smoke_test 检测到 OpenGL 4.6 / Intel Arc）。
+2. 尝试用 `WGL_NV_gpu_affinity`（NVIDIA 的程序级 GPU 指定扩展）显式绑定 4060：
+   - `wglGetProcAddress("wglEnumGpusNV")` 返回空
+   - `opengl32.dll` 与 `nvoglv64.dll`（NVIDIA ICD）的 `GetProcAddress` 均返回空
+   - `objdump` 检查 `nvoglv64.dll` 导出表：仅 ordinal-only ICD 入口，`wglEnumGpusNV` 等已不导出
+3. **结论**：`WGL_NV_gpu_affinity` 在当前 NVIDIA 驱动（R566.24）中已被移除，OpenGL 程序无法在代码层面强制指定独显。
+
+### 影响与建议
+
+- 当前 OpenDLL 的 OpenGL 后端运行在 Intel Arc 集显上（OpenGL 4.6，1024 线程/workgroup）。
+- 若需使用 RTX 4060 独显加速，须在 **Windows 图形设置**（设置 → 系统 → 显示 → 图形）为程序指定「高性能」GPU，或通过 **NVIDIA 控制面板** 指定，属系统级配置而非程序级 API。
+
+### 下一步（M4）
+
+复现 ResNet18（conv + batchnorm + 残差连接 + global avg pool）。

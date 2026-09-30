@@ -20,5 +20,9 @@ Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tens
                    const Tensor& mean, const Tensor& var, float eps);
 Tensor softmax(Device& dev, const Tensor& x);
 Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target);
+Tensor relu_backward(Device& dev, const Tensor& grad_out, const Tensor& x);
+Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& target);
+Tensor transpose(Device& dev, const Tensor& x);
+Tensor sum_axis0(Device& dev, const Tensor& x);
 
 }  // namespace opendll::cpu_ops

@@ -372,6 +372,78 @@ void main() {
 }
 )";
 
+// relu 反向。
+const char* kReluBackwardSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer Xb { float x[]; };
+layout(std430, binding = 2) buffer Yb { float y[]; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < y.length()) {
+        y[idx] = (x[idx] > 0.0) ? go[idx] : 0.0;
+    }
+}
+)";
+
+// 交叉熵反向：softmax - onehot。
+const char* kCrossEntropyBackwardSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Lb { float logits[]; };
+layout(std430, binding = 1) buffer Tb { float target[]; };
+layout(std430, binding = 2) buffer Gb { float grad[]; };
+layout(std430, binding = 3) buffer Params { int N; int C; };
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (int(row) >= N) return;
+    float m = logits[row * C];
+    for (int j = 1; j < C; ++j) m = max(m, logits[row * C + j]);
+    float s = 0.0;
+    for (int j = 0; j < C; ++j) s += exp(logits[row * C + j] - m);
+    int t = int(target[row]);
+    for (int j = 0; j < C; ++j) {
+        float p = exp(logits[row * C + j] - m) / s;
+        grad[row * C + j] = p - (j == t ? 1.0 : 0.0);
+    }
+}
+)";
+
+// 2D 转置。
+const char* kTransposeSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Yb { float y[]; };
+layout(std430, binding = 2) buffer Params { int M; int N; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (int(idx) >= M * N) return;
+    int i = int(idx) / N;
+    int j = int(idx) % N;
+    y[j * M + i] = x[idx];
+}
+)";
+
+// 沿第 0 维求和：[M, N] -> [N]。
+const char* kSumAxis0Src = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Yb { float y[]; };
+layout(std430, binding = 2) buffer Params { int M; int N; };
+void main() {
+    uint j = gl_GlobalInvocationID.x;
+    if (int(j) >= N) return;
+    float s = 0.0;
+    for (int i = 0; i < M; ++i) {
+        s += x[i * N + j];
+    }
+    y[j] = s;
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -388,6 +460,10 @@ struct Cache {
     std::unique_ptr<Kernel> batchnorm;
     std::unique_ptr<Kernel> softmax;
     std::unique_ptr<Kernel> cross_entropy;
+    std::unique_ptr<Kernel> relu_backward;
+    std::unique_ptr<Kernel> cross_entropy_backward;
+    std::unique_ptr<Kernel> transpose;
+    std::unique_ptr<Kernel> sum_axis0;
     std::unique_ptr<Buffer> params;        // matmul 的 {M, N, K}
     std::unique_ptr<Buffer> conv_params;   // conv2d naive 的 11 个 int
     std::unique_ptr<Buffer> linear_params; // linear 的 {M, K, N}（linear_gemm 复用）
@@ -704,6 +780,82 @@ Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
     const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
     dev.main_queue().dispatch(*kernel, gx, 1, 1, bindings);
     return loss;
+}
+
+Tensor relu_backward(Device& dev, const Tensor& grad_out, const Tensor& x) {
+    Tensor y(dev, x.shape());
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.relu_backward, kReluBackwardSrc);
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &x.buffer()}, {2u, &y.buffer()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((x.numel() + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& target) {
+    const std::int32_t N = static_cast<std::int32_t>(logits.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(logits.dim(1));
+
+    Tensor grad(dev, {N, C});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.cross_entropy_backward, kCrossEntropyBackwardSrc);
+    if (!cache.sm_params) {
+        cache.sm_params = dev.alloc(2 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[2] = {N, C};
+    dev.main_queue().upload(*cache.sm_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &logits.buffer()},
+        {1u, &target.buffer()},
+        {2u, &grad.buffer()},
+        {3u, cache.sm_params.get()},
+    };
+    const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return grad;
+}
+
+Tensor transpose(Device& dev, const Tensor& x) {
+    const std::int32_t M = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(1));
+
+    Tensor y(dev, {N, M});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.transpose, kTransposeSrc);
+    if (!cache.sm_params) {
+        cache.sm_params = dev.alloc(2 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[2] = {M, N};
+    dev.main_queue().upload(*cache.sm_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &y.buffer()}, {2u, cache.sm_params.get()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((M * N + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor sum_axis0(Device& dev, const Tensor& x) {
+    const std::int32_t M = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(1));
+
+    Tensor y(dev, {N});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.sum_axis0, kSumAxis0Src);
+    if (!cache.sm_params) {
+        cache.sm_params = dev.alloc(2 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[2] = {M, N};
+    dev.main_queue().upload(*cache.sm_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &y.buffer()}, {2u, cache.sm_params.get()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return y;
 }
 
 }  // namespace opendll::gl_ops

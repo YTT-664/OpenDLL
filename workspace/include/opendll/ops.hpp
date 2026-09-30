@@ -44,4 +44,18 @@ Tensor softmax(Device& dev, const Tensor& x);
 // -> loss: [N]（逐样本损失，未平均）。
 Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target);
 
+// ---- backward 算子 ----
+
+// relu 反向：grad_in = grad_out * (x > 0)
+Tensor relu_backward(Device& dev, const Tensor& grad_out, const Tensor& x);
+
+// 交叉熵反向：grad_logits = softmax(logits) - onehot(target)，返回 [N, C]
+Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& target);
+
+// 2D 转置：[M, N] -> [N, M]
+Tensor transpose(Device& dev, const Tensor& x);
+
+// 沿第 0 维求和：[M, N] -> [N]
+Tensor sum_axis0(Device& dev, const Tensor& x);
+
 }  // namespace opendll

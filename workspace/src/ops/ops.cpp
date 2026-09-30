@@ -150,4 +150,40 @@ Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
     return cpu_ops::cross_entropy(dev, logits, target);
 }
 
+Tensor relu_backward(Device& dev, const Tensor& grad_out, const Tensor& x) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::relu_backward(dev, grad_out, x);
+    }
+#endif
+    return cpu_ops::relu_backward(dev, grad_out, x);
+}
+
+Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& target) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::cross_entropy_backward(dev, logits, target);
+    }
+#endif
+    return cpu_ops::cross_entropy_backward(dev, logits, target);
+}
+
+Tensor transpose(Device& dev, const Tensor& x) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::transpose(dev, x);
+    }
+#endif
+    return cpu_ops::transpose(dev, x);
+}
+
+Tensor sum_axis0(Device& dev, const Tensor& x) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::sum_axis0(dev, x);
+    }
+#endif
+    return cpu_ops::sum_axis0(dev, x);
+}
+
 }  // namespace opendll

@@ -322,4 +322,82 @@ Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
     return out;
 }
 
+Tensor relu_backward(Device& dev, const Tensor& grad_out, const Tensor& x) {
+    std::vector<float> GO, X;
+    grad_out.download(GO);
+    x.download(X);
+    for (std::size_t i = 0; i < X.size(); ++i) {
+        GO[i] = X[i] > 0.0f ? GO[i] : 0.0f;
+    }
+    Tensor out(dev, x.shape());
+    out.upload(GO);
+    return out;
+}
+
+Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& target) {
+    const int N = static_cast<int>(logits.dim(0));
+    const int C = static_cast<int>(logits.dim(1));
+
+    std::vector<float> L, T;
+    logits.download(L);
+    target.download(T);
+
+    std::vector<float> G(static_cast<std::size_t>(N) * C);
+    for (int i = 0; i < N; ++i) {
+        float m = L[static_cast<std::size_t>(i) * C];
+        for (int j = 1; j < C; ++j) {
+            m = std::max(m, L[static_cast<std::size_t>(i) * C + j]);
+        }
+        float s = 0.0f;
+        for (int j = 0; j < C; ++j) {
+            s += std::exp(L[static_cast<std::size_t>(i) * C + j] - m);
+        }
+        const int t = static_cast<int>(T[i]);
+        for (int j = 0; j < C; ++j) {
+            const float p = std::exp(L[static_cast<std::size_t>(i) * C + j] - m) / s;
+            G[static_cast<std::size_t>(i) * C + j] = p - (j == t ? 1.0f : 0.0f);
+        }
+    }
+
+    Tensor out(dev, {N, C});
+    out.upload(G);
+    return out;
+}
+
+Tensor transpose(Device& dev, const Tensor& x) {
+    const int M = static_cast<int>(x.dim(0));
+    const int N = static_cast<int>(x.dim(1));
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> Y(static_cast<std::size_t>(M) * N);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            Y[static_cast<std::size_t>(j) * M + i] = X[static_cast<std::size_t>(i) * N + j];
+        }
+    }
+
+    Tensor out(dev, {N, M});
+    out.upload(Y);
+    return out;
+}
+
+Tensor sum_axis0(Device& dev, const Tensor& x) {
+    const int M = static_cast<int>(x.dim(0));
+    const int N = static_cast<int>(x.dim(1));
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> Y(N, 0.0f);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            Y[j] += X[static_cast<std::size_t>(i) * N + j];
+        }
+    }
+
+    Tensor out(dev, {N});
+    out.upload(Y);
+    return out;
+}
+
 }  // namespace opendll::cpu_ops

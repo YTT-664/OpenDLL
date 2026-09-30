@@ -27,3 +27,6 @@ Thumbs.db
 
 # ---- Internal docs (kept local, not tracked on GitHub) ----
 docs/OpenDLL-plan.md
+
+# ---- Datasets (kept local, not uploaded) ----
+data/

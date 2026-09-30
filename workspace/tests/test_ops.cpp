@@ -359,6 +359,109 @@ int main() {
         all_ok = all_ok && ok;
     }
 
+    // ---- relu_backward ----
+    {
+        const int64_t N = 1024;
+        const auto GO = random_floats(static_cast<std::size_t>(N), rng);
+        const auto X = random_floats(static_cast<std::size_t>(N), rng);
+
+        Tensor go_cpu(*cpu, {N}), x_cpu(*cpu, {N});
+        go_cpu.upload(GO);
+        x_cpu.upload(X);
+        Tensor y_cpu = relu_backward(*cpu, go_cpu, x_cpu);
+
+        Tensor go_gl(*gl, {N}), x_gl(*gl, {N});
+        go_gl.upload(GO);
+        x_gl.upload(X);
+        Tensor y_gl = relu_backward(*gl, go_gl, x_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[relu_backward] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- cross_entropy_backward ----
+    {
+        const int64_t N = 8, C = 10;
+        const auto L = random_floats(static_cast<std::size_t>(N * C), rng);
+        std::uniform_int_distribution<int> label_dist(0, static_cast<int>(C - 1));
+        std::vector<float> T(N);
+        for (auto& t : T) {
+            t = static_cast<float>(label_dist(rng));
+        }
+
+        Tensor l_cpu(*cpu, {N, C}), t_cpu(*cpu, {N});
+        l_cpu.upload(L);
+        t_cpu.upload(T);
+        Tensor g_cpu = cross_entropy_backward(*cpu, l_cpu, t_cpu);
+
+        Tensor l_gl(*gl, {N, C}), t_gl(*gl, {N});
+        l_gl.upload(L);
+        t_gl.upload(T);
+        Tensor g_gl = cross_entropy_backward(*gl, l_gl, t_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        g_cpu.download(a);
+        g_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-3f;
+        std::cout << "[cross_entropy_backward] max_abs_diff=" << d << (ok ? " PASS" : " FAIL")
+                  << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- transpose ----
+    {
+        const int64_t M = 16, N = 24;
+        const auto X = random_floats(static_cast<std::size_t>(M * N), rng);
+
+        Tensor x_cpu(*cpu, {M, N});
+        x_cpu.upload(X);
+        Tensor y_cpu = transpose(*cpu, x_cpu);
+
+        Tensor x_gl(*gl, {M, N});
+        x_gl.upload(X);
+        Tensor y_gl = transpose(*gl, x_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[transpose] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- sum_axis0 ----
+    {
+        const int64_t M = 32, N = 16;
+        const auto X = random_floats(static_cast<std::size_t>(M * N), rng);
+
+        Tensor x_cpu(*cpu, {M, N});
+        x_cpu.upload(X);
+        Tensor y_cpu = sum_axis0(*cpu, x_cpu);
+
+        Tensor x_gl(*gl, {M, N});
+        x_gl.upload(X);
+        Tensor y_gl = sum_axis0(*gl, x_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-3f;
+        std::cout << "[sum_axis0] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
     std::cout << (all_ok ? "ALL OPS PASSED" : "SOME OPS FAILED") << "\n";
     return all_ok ? 0 : 1;
 }

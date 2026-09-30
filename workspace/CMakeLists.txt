@@ -10,6 +10,9 @@ add_library(opendll
     src/tensor.cpp
     src/ops/ops.cpp
     src/ops/cpu_ops.cpp
+    src/module.cpp
+    src/optimizer.cpp
+    src/dataset.cpp
 )
 target_include_directories(opendll PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -35,3 +38,13 @@ target_link_libraries(test_ops PRIVATE opendll)
 
 add_test(NAME smoke_test COMMAND smoke_test)
 add_test(NAME test_ops COMMAND test_ops)
+
+# 训练示例
+add_executable(train_mlp examples/train_mlp.cpp)
+target_link_libraries(train_mlp PRIVATE opendll)
+
+# GPU 独显测试（WGL_NV_gpu_affinity，仅 Windows）
+if(WIN32)
+    add_executable(test_gpu examples/test_gpu.cpp)
+    target_link_libraries(test_gpu PRIVATE opengl32 user32 gdi32)
+endif()
