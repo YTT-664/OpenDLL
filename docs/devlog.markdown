@@ -236,12 +236,32 @@ loss 单调下降、测试准确率单调上升至 86%，反向传播梯度正�
    - `wglGetProcAddress("wglEnumGpusNV")` 返回空
    - `opengl32.dll` 与 `nvoglv64.dll`（NVIDIA ICD）的 `GetProcAddress` 均返回空
    - `objdump` 检查 `nvoglv64.dll` 导出表：仅 ordinal-only ICD 入口，`wglEnumGpusNV` 等已不导出
-3. **结论**：`WGL_NV_gpu_affinity` 在当前 NVIDIA 驱动（R566.24）中已被移除，OpenGL 程序无法在代码层面强制指定独显。
+3. **初步结论**：`WGL_NV_gpu_affinity` 在当前 NVIDIA 驱动（R566.24）中已被移除。
+4. **有效方案**：在 exe 中导出 `NvOptimusEnablement`（NVIDIA Optimus 官方机制）：
 
-### 影响与建议
+   ```cpp
+   extern "C" {
+   __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
+   }
+   ```
 
-- 当前 OpenDLL 的 OpenGL 后端运行在 Intel Arc 集显上（OpenGL 4.6，1024 线程/workgroup）。
-- 若需使用 RTX 4060 独显加速，须在 **Windows 图形设置**（设置 → 系统 → 显示 → 图形）为程序指定「高性能」GPU，或通过 **NVIDIA 控制面板** 指定，属系统级配置而非程序级 API。
+   NVIDIA 驱动检测到该导出符号后，自动将 OpenGL 上下文调度到独显。
+
+### 验证结果
+
+| 项 | 结果 |
+| --- | --- |
+| `smoke_test.exe` 导出 `NvOptimusEnablement` | 是 |
+| 切换后 renderer | `NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2` |
+| 切换后版本 | `OpenGL 4.6.0 NVIDIA 566.24` |
+| compute shader dispatch | PASS |
+| shared memory | 49152（48KB，比 Intel Arc 的 32KB 更大） |
+
+### 集成方式
+
+导出变量定义在 `device_factory.cpp`（`Device::create` 是库入口、始终被链接），保证符号进入最终 exe 并导出。**OpenDLL 的 OpenGL 后端现已默认运行在 RTX 4060 独显上**。
+
+> 备注：`WGL_NV_gpu_affinity` 是程序级 GPU 枚举扩展，已被移除；`NvOptimusEnablement` 是 Optimus 调度开关，二者机制不同、后者在新驱动仍有效。
 
 ### 下一步（M4）
 
