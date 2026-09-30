@@ -58,4 +58,35 @@ Tensor mul(Device& dev, const Tensor& a, const Tensor& b) {
     return cpu_ops::mul(dev, a, b);
 }
 
+Tensor conv2d(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b,
+              int stride, int padding) {
+    if (x.ndim() != 4 || w.ndim() != 4) {
+        throw std::invalid_argument("conv2d expects 4D x and w");
+    }
+    if (x.dim(1) != w.dim(1)) {
+        throw std::invalid_argument("conv2d channel mismatch");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::conv2d(dev, x, w, b, stride, padding);
+    }
+#endif
+    return cpu_ops::conv2d(dev, x, w, b, stride, padding);
+}
+
+Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b) {
+    if (x.ndim() != 2 || w.ndim() != 2) {
+        throw std::invalid_argument("linear expects 2D x and w");
+    }
+    if (x.dim(1) != w.dim(1)) {
+        throw std::invalid_argument("linear shape mismatch");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::linear(dev, x, w, b);
+    }
+#endif
+    return cpu_ops::linear(dev, x, w, b);
+}
+
 }  // namespace opendll

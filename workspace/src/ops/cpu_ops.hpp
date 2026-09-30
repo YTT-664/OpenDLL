@@ -11,5 +11,8 @@ Tensor matmul(Device& dev, const Tensor& a, const Tensor& b);
 Tensor relu(Device& dev, const Tensor& x);
 Tensor add(Device& dev, const Tensor& a, const Tensor& b);
 Tensor mul(Device& dev, const Tensor& a, const Tensor& b);
+Tensor conv2d(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b,
+              int stride, int padding);
+Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b);
 
 }  // namespace opendll::cpu_ops

@@ -129,6 +129,38 @@ ALL OPS PASSED
 
 elementwise 精确一致（单次浮点运算无误差），matmul 误差 `9.5e-7` 为 fp32 累加的正常水平。
 
-### 下一步（M2）
+## M2 — ResNet 算子集（进行中）
 
-完整 ResNet 算子集：conv2d / batchnorm / maxpool / avgpool / linear / softmax-cross-entropy，沿用 CPU↔OpenGL diff 验证。
+> 日期：2026-09-30
+> 里程碑：M2
+
+### 本期完成：conv2d 与 linear（naive → im2col/GEMM 演进）
+
+按「先 naive 验证正确性，再优化」的策略，conv2d 与 linear 各经历两个阶段：
+
+| 算子 | naive | 优化版 |
+| --- | --- | --- |
+| conv2d | 三重循环 shader | im2col + 16×16 tiled GEMM |
+| linear | 三重循环 shader | 16×16 tiled GEMM |
+
+### 实现要点
+
+- **im2col shader**：`X [N,Cin,H,W]` → 列矩阵 `col [Kcol, Ncol]`（`Kcol=Cin·KH·KW`，`Ncol=N·Hout·Wout`），越界补零。
+- **conv GEMM**：`W @ col`，16×16 shared-memory tile，结果直接写回 NCHW 布局（含 bias），省去一次重排。
+- **linear GEMM**：`x @ w^T + b`，16×16 tile，`w` 转置访问（B tile 连续读）。
+- **标量参数走 SSBO**：与 M1 一致，维度参数经 params buffer 传入，复用 `BufferBinding` 机制。
+- **关键修复**：tiled GEMM 需用 `gl_LocalInvocationID` 索引 shared memory（初版误用 global id，M/N>16 时越界导致 diff 失败）。
+
+naive 的 shader 源码（`kConv2dSrc` / `kLinearSrc`）保留在代码中作参考。
+
+### diff 测试结果
+
+```
+[conv2d] max_abs_diff=9.53674e-07 PASS
+[linear] max_abs_diff=4.29153e-06 PASS
+ALL OPS PASSED
+```
+
+### 待办（M2 剩余）
+
+batchnorm2d / maxpool2d / avgpool2d / softmax+cross_entropy，沿用 CPU↔OpenGL diff 验证。

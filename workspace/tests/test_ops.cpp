@@ -148,6 +148,75 @@ int main() {
         all_ok = all_ok && ok;
     }
 
+    // ---- conv2d ----
+    {
+        const int64_t N = 1, Cin = 3, H = 16, W = 16;
+        const int64_t Cout = 4, KH = 3, KW = 3;
+        const int stride = 1, padding = 1;
+
+        const auto X = random_floats(static_cast<std::size_t>(N * Cin * H * W), rng);
+        const auto Wt = random_floats(static_cast<std::size_t>(Cout * Cin * KH * KW), rng);
+        const auto B = random_floats(static_cast<std::size_t>(Cout), rng);
+
+        Tensor x_cpu(*cpu, {N, Cin, H, W});
+        Tensor w_cpu(*cpu, {Cout, Cin, KH, KW});
+        Tensor b_cpu(*cpu, {Cout});
+        x_cpu.upload(X);
+        w_cpu.upload(Wt);
+        b_cpu.upload(B);
+        Tensor y_cpu = conv2d(*cpu, x_cpu, w_cpu, b_cpu, stride, padding);
+
+        Tensor x_gl(*gl, {N, Cin, H, W});
+        Tensor w_gl(*gl, {Cout, Cin, KH, KW});
+        Tensor b_gl(*gl, {Cout});
+        x_gl.upload(X);
+        w_gl.upload(Wt);
+        b_gl.upload(B);
+        Tensor y_gl = conv2d(*gl, x_gl, w_gl, b_gl, stride, padding);
+        gl->synchronize();
+
+        std::vector<float> out_cpu, out_gl;
+        y_cpu.download(out_cpu);
+        y_gl.download(out_gl);
+        const float d = max_abs_diff(out_cpu, out_gl);
+        const bool ok = d < 1e-3f;
+        std::cout << "[conv2d] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- linear ----
+    {
+        const int64_t M = 64, K = 128, N = 32;
+        const auto X = random_floats(static_cast<std::size_t>(M * K), rng);
+        const auto Wt = random_floats(static_cast<std::size_t>(N * K), rng);
+        const auto B = random_floats(static_cast<std::size_t>(N), rng);
+
+        Tensor x_cpu(*cpu, {M, K});
+        Tensor w_cpu(*cpu, {N, K});
+        Tensor b_cpu(*cpu, {N});
+        x_cpu.upload(X);
+        w_cpu.upload(Wt);
+        b_cpu.upload(B);
+        Tensor y_cpu = linear(*cpu, x_cpu, w_cpu, b_cpu);
+
+        Tensor x_gl(*gl, {M, K});
+        Tensor w_gl(*gl, {N, K});
+        Tensor b_gl(*gl, {N});
+        x_gl.upload(X);
+        w_gl.upload(Wt);
+        b_gl.upload(B);
+        Tensor y_gl = linear(*gl, x_gl, w_gl, b_gl);
+        gl->synchronize();
+
+        std::vector<float> out_cpu, out_gl;
+        y_cpu.download(out_cpu);
+        y_gl.download(out_gl);
+        const float d = max_abs_diff(out_cpu, out_gl);
+        const bool ok = d < 1e-3f;
+        std::cout << "[linear] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
     std::cout << (all_ok ? "ALL OPS PASSED" : "SOME OPS FAILED") << "\n";
     return all_ok ? 0 : 1;
 }
