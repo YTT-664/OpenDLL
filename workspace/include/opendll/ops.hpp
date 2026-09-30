@@ -26,4 +26,22 @@ Tensor conv2d(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b,
 // 全连接层（含 bias）。x: [M, K]，w: [N, K]，b: [N] -> y: [M, N]，y = x @ w^T + b
 Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b);
 
+// 最大池化（正方形窗口）。x: [N, C, H, W] -> [N, C, H_out, W_out]。
+Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
+
+// 平均池化（正方形窗口），对窗口内有效（非 padding）元素取平均。
+Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
+
+// 批归一化（给定均值/方差）。x: [N, C, H, W]，gamma/beta/mean/var: [C]。
+// y = (x - mean) / sqrt(var + eps) * gamma + beta
+Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   const Tensor& mean, const Tensor& var, float eps);
+
+// softmax 沿最后一维。x: [N, C] -> [N, C]（数值稳定：max 减法）。
+Tensor softmax(Device& dev, const Tensor& x);
+
+// 交叉熵（融合 log_softmax + nll）。logits: [N, C]，target: [N]（float 存整数标签）
+// -> loss: [N]（逐样本损失，未平均）。
+Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target);
+
 }  // namespace opendll

@@ -14,5 +14,11 @@ Tensor mul(Device& dev, const Tensor& a, const Tensor& b);
 Tensor conv2d(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b,
               int stride, int padding);
 Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b);
+Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
+Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
+Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   const Tensor& mean, const Tensor& var, float eps);
+Tensor softmax(Device& dev, const Tensor& x);
+Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target);
 
 }  // namespace opendll::gl_ops

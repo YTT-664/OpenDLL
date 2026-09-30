@@ -129,7 +129,7 @@ ALL OPS PASSED
 
 elementwise 精确一致（单次浮点运算无误差），matmul 误差 `9.5e-7` 为 fp32 累加的正常水平。
 
-## M2 — ResNet 算子集（进行中）
+## M2 — ResNet 算子集（完成）
 
 > 日期：2026-09-30
 > 里程碑：M2
@@ -161,6 +161,23 @@ naive 的 shader 源码（`kConv2dSrc` / `kLinearSrc`）保留在代码中作参
 ALL OPS PASSED
 ```
 
-### 待办（M2 剩余）
+### 完成：其余 ResNet 算子
 
-batchnorm2d / maxpool2d / avgpool2d / softmax+cross_entropy，沿用 CPU↔OpenGL diff 验证。
+```
+[maxpool2d]     0          PASS
+[avgpool2d]     0          PASS
+[batchnorm2d]   1.19209e-07 PASS
+[softmax]       2.98023e-08 PASS
+[cross_entropy] 0          PASS
+```
+
+- **maxpool2d / avgpool2d**：正方形窗口池化；avgpool 对窗口内有效（非 padding）元素取平均。
+- **batchnorm2d**：给定 mean/var 的归一化 `y = (x - mean)/sqrt(var + eps) * gamma + beta`。
+- **softmax**：沿最后一维，max 减法保证数值稳定。
+- **cross_entropy**：融合 log_softmax + nll（logsumexp 形式），返回逐样本损失。
+
+至此 ResNet18/50 所需的 **forward 算子集全部就绪**（共 11 个算子），每个均有 CPU 参考实现 + OpenGL compute shader，统一经 `ops.cpp` 后端分发、随机数据 diff 验证。
+
+### 下一步（M3）
+
+Module 层 + 静态计算图 + backward 梯度，搭 MLP 在 CIFAR 收敛。

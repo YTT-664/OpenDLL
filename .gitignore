@@ -24,3 +24,6 @@ CMakeCache.txt
 # ---- OS ----
 Thumbs.db
 .DS_Store
+
+# ---- Internal docs (kept local, not tracked on GitHub) ----
+docs/OpenDLL-plan.md

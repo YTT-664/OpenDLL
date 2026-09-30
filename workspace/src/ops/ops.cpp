@@ -89,4 +89,65 @@ Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b) {
     return cpu_ops::linear(dev, x, w, b);
 }
 
+Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    if (x.ndim() != 4) {
+        throw std::invalid_argument("maxpool2d expects 4D x");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::maxpool2d(dev, x, kernel, stride, padding);
+    }
+#endif
+    return cpu_ops::maxpool2d(dev, x, kernel, stride, padding);
+}
+
+Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    if (x.ndim() != 4) {
+        throw std::invalid_argument("avgpool2d expects 4D x");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::avgpool2d(dev, x, kernel, stride, padding);
+    }
+#endif
+    return cpu_ops::avgpool2d(dev, x, kernel, stride, padding);
+}
+
+Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   const Tensor& mean, const Tensor& var, float eps) {
+    if (x.ndim() != 4) {
+        throw std::invalid_argument("batchnorm2d expects 4D x");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::batchnorm2d(dev, x, gamma, beta, mean, var, eps);
+    }
+#endif
+    return cpu_ops::batchnorm2d(dev, x, gamma, beta, mean, var, eps);
+}
+
+Tensor softmax(Device& dev, const Tensor& x) {
+    if (x.ndim() != 2) {
+        throw std::invalid_argument("softmax expects 2D x");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::softmax(dev, x);
+    }
+#endif
+    return cpu_ops::softmax(dev, x);
+}
+
+Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
+    if (logits.ndim() != 2 || target.ndim() != 1) {
+        throw std::invalid_argument("cross_entropy expects 2D logits and 1D target");
+    }
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::cross_entropy(dev, logits, target);
+    }
+#endif
+    return cpu_ops::cross_entropy(dev, logits, target);
+}
+
 }  // namespace opendll

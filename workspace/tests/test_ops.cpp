@@ -217,6 +217,148 @@ int main() {
         all_ok = all_ok && ok;
     }
 
+    // ---- maxpool2d ----
+    {
+        const int64_t N = 1, C = 2, H = 8, W = 8;
+        const int kernel = 3, stride = 2, padding = 1;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+
+        Tensor x_cpu(*cpu, {N, C, H, W});
+        x_cpu.upload(X);
+        Tensor y_cpu = maxpool2d(*cpu, x_cpu, kernel, stride, padding);
+
+        Tensor x_gl(*gl, {N, C, H, W});
+        x_gl.upload(X);
+        Tensor y_gl = maxpool2d(*gl, x_gl, kernel, stride, padding);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[maxpool2d] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- avgpool2d ----
+    {
+        const int64_t N = 1, C = 2, H = 8, W = 8;
+        const int kernel = 2, stride = 2, padding = 0;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+
+        Tensor x_cpu(*cpu, {N, C, H, W});
+        x_cpu.upload(X);
+        Tensor y_cpu = avgpool2d(*cpu, x_cpu, kernel, stride, padding);
+
+        Tensor x_gl(*gl, {N, C, H, W});
+        x_gl.upload(X);
+        Tensor y_gl = avgpool2d(*gl, x_gl, kernel, stride, padding);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[avgpool2d] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- batchnorm2d ----
+    {
+        const int64_t N = 2, C = 3, H = 4, W = 4;
+        const float eps = 1e-5f;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+        const auto G = random_floats(static_cast<std::size_t>(C), rng);
+        const auto B = random_floats(static_cast<std::size_t>(C), rng);
+        const auto M = random_floats(static_cast<std::size_t>(C), rng);
+        std::vector<float> V(C);
+        for (int i = 0; i < C; ++i) {
+            V[i] = 0.5f + 0.2f * i;
+        }
+
+        Tensor x_cpu(*cpu, {N, C, H, W}), g_cpu(*cpu, {C}), b_cpu(*cpu, {C}),
+            m_cpu(*cpu, {C}), v_cpu(*cpu, {C});
+        x_cpu.upload(X);
+        g_cpu.upload(G);
+        b_cpu.upload(B);
+        m_cpu.upload(M);
+        v_cpu.upload(V);
+        Tensor y_cpu = batchnorm2d(*cpu, x_cpu, g_cpu, b_cpu, m_cpu, v_cpu, eps);
+
+        Tensor x_gl(*gl, {N, C, H, W}), g_gl(*gl, {C}), b_gl(*gl, {C}),
+            m_gl(*gl, {C}), v_gl(*gl, {C});
+        x_gl.upload(X);
+        g_gl.upload(G);
+        b_gl.upload(B);
+        m_gl.upload(M);
+        v_gl.upload(V);
+        Tensor y_gl = batchnorm2d(*gl, x_gl, g_gl, b_gl, m_gl, v_gl, eps);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-3f;
+        std::cout << "[batchnorm2d] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- softmax ----
+    {
+        const int64_t N = 8, C = 10;
+        const auto X = random_floats(static_cast<std::size_t>(N * C), rng);
+
+        Tensor x_cpu(*cpu, {N, C});
+        x_cpu.upload(X);
+        Tensor y_cpu = softmax(*cpu, x_cpu);
+
+        Tensor x_gl(*gl, {N, C});
+        x_gl.upload(X);
+        Tensor y_gl = softmax(*gl, x_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        y_cpu.download(a);
+        y_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-3f;
+        std::cout << "[softmax] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- cross_entropy ----
+    {
+        const int64_t N = 8, C = 10;
+        const auto X = random_floats(static_cast<std::size_t>(N * C), rng);
+        std::uniform_int_distribution<int> label_dist(0, static_cast<int>(C - 1));
+        std::vector<float> T(N);
+        for (auto& t : T) {
+            t = static_cast<float>(label_dist(rng));
+        }
+
+        Tensor l_cpu(*cpu, {N, C}), t_cpu(*cpu, {N});
+        l_cpu.upload(X);
+        t_cpu.upload(T);
+        Tensor loss_cpu = cross_entropy(*cpu, l_cpu, t_cpu);
+
+        Tensor l_gl(*gl, {N, C}), t_gl(*gl, {N});
+        l_gl.upload(X);
+        t_gl.upload(T);
+        Tensor loss_gl = cross_entropy(*gl, l_gl, t_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        loss_cpu.download(a);
+        loss_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-3f;
+        std::cout << "[cross_entropy] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
     std::cout << (all_ok ? "ALL OPS PASSED" : "SOME OPS FAILED") << "\n";
     return all_ok ? 0 : 1;
 }

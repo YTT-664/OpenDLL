@@ -247,6 +247,131 @@ void main() {
 }
 )";
 
+// 最大池化（正方形窗口）。
+const char* kMaxPoolSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Yb { float y[]; };
+layout(std430, binding = 2) buffer Params {
+    int N, C, H, Wd, Hout, Wout, K, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * Hout * Wout;
+    if (int(idx) >= total) return;
+    int ow = int(idx) % Wout;
+    int oh = (int(idx) / Wout) % Hout;
+    int c = (int(idx) / (Wout * Hout)) % C;
+    int n = int(idx) / (Wout * Hout * C);
+    float m = -1.0e30;
+    for (int kh = 0; kh < K; ++kh) {
+        int ih = oh * stride + kh - pad;
+        if (ih < 0 || ih >= H) continue;
+        for (int kw = 0; kw < K; ++kw) {
+            int iw = ow * stride + kw - pad;
+            if (iw < 0 || iw >= Wd) continue;
+            m = max(m, x[((n * C + c) * H + ih) * Wd + iw]);
+        }
+    }
+    y[idx] = m;
+}
+)";
+
+// 平均池化（正方形窗口，对有效元素取平均）。
+const char* kAvgPoolSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Yb { float y[]; };
+layout(std430, binding = 2) buffer Params {
+    int N, C, H, Wd, Hout, Wout, K, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * Hout * Wout;
+    if (int(idx) >= total) return;
+    int ow = int(idx) % Wout;
+    int oh = (int(idx) / Wout) % Hout;
+    int c = (int(idx) / (Wout * Hout)) % C;
+    int n = int(idx) / (Wout * Hout * C);
+    float sum = 0.0;
+    int cnt = 0;
+    for (int kh = 0; kh < K; ++kh) {
+        int ih = oh * stride + kh - pad;
+        if (ih < 0 || ih >= H) continue;
+        for (int kw = 0; kw < K; ++kw) {
+            int iw = ow * stride + kw - pad;
+            if (iw < 0 || iw >= Wd) continue;
+            sum += x[((n * C + c) * H + ih) * Wd + iw];
+            cnt += 1;
+        }
+    }
+    y[idx] = sum / float(cnt);
+}
+)";
+
+// 批归一化（给定均值/方差）。
+const char* kBatchnormSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Gb { float g[]; };
+layout(std430, binding = 2) buffer Bb { float b[]; };
+layout(std430, binding = 3) buffer Mb { float mean[]; };
+layout(std430, binding = 4) buffer Vb { float var[]; };
+layout(std430, binding = 5) buffer Yb { float y[]; };
+layout(std430, binding = 6) buffer Params { int C; int HW; float eps; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int c = (int(idx) / HW) % C;
+    float scale = 1.0 / sqrt(var[c] + eps);
+    y[idx] = (x[idx] - mean[c]) * scale * g[c] + b[c];
+}
+)";
+
+// softmax 沿最后一维（每行一个线程）。
+const char* kSoftmaxSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Yb { float y[]; };
+layout(std430, binding = 2) buffer Params { int N; int C; };
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (int(row) >= N) return;
+    float m = x[row * C];
+    for (int j = 1; j < C; ++j) m = max(m, x[row * C + j]);
+    float s = 0.0;
+    for (int j = 0; j < C; ++j) {
+        y[row * C + j] = exp(x[row * C + j] - m);
+        s += y[row * C + j];
+    }
+    for (int j = 0; j < C; ++j) y[row * C + j] /= s;
+}
+)";
+
+// 交叉熵（log_softmax + nll，每样本一个线程）。
+const char* kCrossEntropySrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Lb { float logits[]; };
+layout(std430, binding = 1) buffer Tb { float target[]; };
+layout(std430, binding = 2) buffer Yb { float loss[]; };
+layout(std430, binding = 3) buffer Params { int N; int C; };
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    if (int(row) >= N) return;
+    float m = logits[row * C];
+    for (int j = 1; j < C; ++j) m = max(m, logits[row * C + j]);
+    float s = 0.0;
+    for (int j = 0; j < C; ++j) s += exp(logits[row * C + j] - m);
+    float logsumexp = m + log(s);
+    int t = int(target[row]);
+    loss[row] = logsumexp - logits[row * C + t];
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -258,11 +383,19 @@ struct Cache {
     std::unique_ptr<Kernel> im2col;
     std::unique_ptr<Kernel> conv_gemm;    // conv2d 的 tiled GEMM（16x16）
     std::unique_ptr<Kernel> linear_gemm;  // linear 的 tiled GEMM（16x16）
+    std::unique_ptr<Kernel> maxpool;
+    std::unique_ptr<Kernel> avgpool;
+    std::unique_ptr<Kernel> batchnorm;
+    std::unique_ptr<Kernel> softmax;
+    std::unique_ptr<Kernel> cross_entropy;
     std::unique_ptr<Buffer> params;        // matmul 的 {M, N, K}
     std::unique_ptr<Buffer> conv_params;   // conv2d naive 的 11 个 int
     std::unique_ptr<Buffer> linear_params; // linear 的 {M, K, N}（linear_gemm 复用）
     std::unique_ptr<Buffer> im2col_params;    // 10 个 int
     std::unique_ptr<Buffer> conv_gemm_params; // 6 个 int
+    std::unique_ptr<Buffer> pool_params;   // 9 个 int（maxpool/avgpool 复用）
+    std::unique_ptr<Buffer> bn_params;     // 2 int + 1 float
+    std::unique_ptr<Buffer> sm_params;     // 2 个 int（softmax/ce 复用）
     std::unique_ptr<Buffer> col_buf;          // im2col 中间缓冲
     std::size_t col_buf_capacity = 0;
 };
@@ -436,6 +569,141 @@ Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b) {
     const std::uint32_t gy = (static_cast<std::uint32_t>(M) + 15u) / 16u;
     dev.main_queue().dispatch(*kernel, gx, gy, 1, bindings);
     return y;
+}
+
+Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Hout = (H + 2 * padding - kernel) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    Tensor y(dev, {N, C, Hout, Wout});
+
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.maxpool, kMaxPoolSrc);
+    if (!cache.pool_params) {
+        cache.pool_params = dev.alloc(9 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[9] = {N, C, H, W, Hout, Wout, kernel, stride, padding};
+    dev.main_queue().upload(*cache.pool_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &y.buffer()}, {2u, cache.pool_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * C * Hout * Wout;
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Hout = (H + 2 * padding - kernel) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    Tensor y(dev, {N, C, Hout, Wout});
+
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.avgpool, kAvgPoolSrc);
+    if (!cache.pool_params) {
+        cache.pool_params = dev.alloc(9 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[9] = {N, C, H, W, Hout, Wout, kernel, stride, padding};
+    dev.main_queue().upload(*cache.pool_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &y.buffer()}, {2u, cache.pool_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * C * Hout * Wout;
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   const Tensor& mean, const Tensor& var, float eps) {
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t HW = H * W;
+
+    Tensor y(dev, x.shape());
+
+    auto& cache = cache_for(dev);
+    Kernel* kernel = get_or_compile(dev, cache.batchnorm, kBatchnormSrc);
+    if (!cache.bn_params) {
+        cache.bn_params = dev.alloc(12);
+    }
+    struct BNParams {
+        std::int32_t C;
+        std::int32_t HW;
+        float eps;
+    };
+    const BNParams p{C, HW, eps};
+    dev.main_queue().upload(*cache.bn_params, &p, sizeof(p));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()},
+        {1u, &gamma.buffer()},
+        {2u, &beta.buffer()},
+        {3u, &mean.buffer()},
+        {4u, &var.buffer()},
+        {5u, &y.buffer()},
+        {6u, cache.bn_params.get()},
+    };
+    const std::uint32_t total = static_cast<std::uint32_t>(x.numel());
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*kernel, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor softmax(Device& dev, const Tensor& x) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+
+    Tensor y(dev, x.shape());
+
+    auto& cache = cache_for(dev);
+    Kernel* kernel = get_or_compile(dev, cache.softmax, kSoftmaxSrc);
+    if (!cache.sm_params) {
+        cache.sm_params = dev.alloc(2 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[2] = {N, C};
+    dev.main_queue().upload(*cache.sm_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &y.buffer()}, {2u, cache.sm_params.get()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
+    dev.main_queue().dispatch(*kernel, gx, 1, 1, bindings);
+    return y;
+}
+
+Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
+    const std::int32_t N = static_cast<std::int32_t>(logits.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(logits.dim(1));
+
+    Tensor loss(dev, {N});
+
+    auto& cache = cache_for(dev);
+    Kernel* kernel = get_or_compile(dev, cache.cross_entropy, kCrossEntropySrc);
+    if (!cache.sm_params) {
+        cache.sm_params = dev.alloc(2 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[2] = {N, C};
+    dev.main_queue().upload(*cache.sm_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &logits.buffer()},
+        {1u, &target.buffer()},
+        {2u, &loss.buffer()},
+        {3u, cache.sm_params.get()},
+    };
+    const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
+    dev.main_queue().dispatch(*kernel, gx, 1, 1, bindings);
+    return loss;
 }
 
 }  // namespace opendll::gl_ops

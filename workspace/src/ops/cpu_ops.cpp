@@ -1,6 +1,9 @@
 #include "cpu_ops.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 namespace opendll::cpu_ops {
@@ -142,6 +145,180 @@ Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b) {
 
     Tensor out(dev, {static_cast<int64_t>(M), static_cast<int64_t>(N)});
     out.upload(Y);
+    return out;
+}
+
+Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Hout = (H + 2 * padding - kernel) / stride + 1;
+    const int Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> Y(static_cast<std::size_t>(N) * C * Hout * Wout,
+                         -std::numeric_limits<float>::infinity());
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int oh = 0; oh < Hout; ++oh) {
+                for (int ow = 0; ow < Wout; ++ow) {
+                    float m = -std::numeric_limits<float>::infinity();
+                    for (int kh = 0; kh < kernel; ++kh) {
+                        const int ih = oh * stride - padding + kh;
+                        if (ih < 0 || ih >= H) {
+                            continue;
+                        }
+                        for (int kw = 0; kw < kernel; ++kw) {
+                            const int iw = ow * stride - padding + kw;
+                            if (iw < 0 || iw >= W) {
+                                continue;
+                            }
+                            m = std::max(m, X[((static_cast<std::size_t>(n) * C + c) * H + ih) * W + iw]);
+                        }
+                    }
+                    Y[((static_cast<std::size_t>(n) * C + c) * Hout + oh) * Wout + ow] = m;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, C, Hout, Wout});
+    out.upload(Y);
+    return out;
+}
+
+Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Hout = (H + 2 * padding - kernel) / stride + 1;
+    const int Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> Y(static_cast<std::size_t>(N) * C * Hout * Wout, 0.0f);
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int oh = 0; oh < Hout; ++oh) {
+                for (int ow = 0; ow < Wout; ++ow) {
+                    float sum = 0.0f;
+                    int cnt = 0;
+                    for (int kh = 0; kh < kernel; ++kh) {
+                        const int ih = oh * stride - padding + kh;
+                        if (ih < 0 || ih >= H) {
+                            continue;
+                        }
+                        for (int kw = 0; kw < kernel; ++kw) {
+                            const int iw = ow * stride - padding + kw;
+                            if (iw < 0 || iw >= W) {
+                                continue;
+                            }
+                            sum += X[((static_cast<std::size_t>(n) * C + c) * H + ih) * W + iw];
+                            ++cnt;
+                        }
+                    }
+                    Y[((static_cast<std::size_t>(n) * C + c) * Hout + oh) * Wout + ow] =
+                        sum / static_cast<float>(cnt);
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, C, Hout, Wout});
+    out.upload(Y);
+    return out;
+}
+
+Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
+                   const Tensor& mean, const Tensor& var, float eps) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int HW = H * W;
+
+    std::vector<float> X, G, B, M, V;
+    x.download(X);
+    gamma.download(G);
+    beta.download(B);
+    mean.download(M);
+    var.download(V);
+
+    std::vector<float> Y(X.size());
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            const float scale = 1.0f / std::sqrt(V[c] + eps);
+            for (int i = 0; i < HW; ++i) {
+                const std::size_t idx = (static_cast<std::size_t>(n) * C + c) * HW + i;
+                Y[idx] = (X[idx] - M[c]) * scale * G[c] + B[c];
+            }
+        }
+    }
+
+    Tensor out(dev, x.shape());
+    out.upload(Y);
+    return out;
+}
+
+Tensor softmax(Device& dev, const Tensor& x) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> Y(static_cast<std::size_t>(N) * C);
+
+    for (int i = 0; i < N; ++i) {
+        float m = X[static_cast<std::size_t>(i) * C];
+        for (int j = 1; j < C; ++j) {
+            m = std::max(m, X[static_cast<std::size_t>(i) * C + j]);
+        }
+        float s = 0.0f;
+        for (int j = 0; j < C; ++j) {
+            const float e = std::exp(X[static_cast<std::size_t>(i) * C + j] - m);
+            Y[static_cast<std::size_t>(i) * C + j] = e;
+            s += e;
+        }
+        for (int j = 0; j < C; ++j) {
+            Y[static_cast<std::size_t>(i) * C + j] /= s;
+        }
+    }
+
+    Tensor out(dev, {N, C});
+    out.upload(Y);
+    return out;
+}
+
+Tensor cross_entropy(Device& dev, const Tensor& logits, const Tensor& target) {
+    const int N = static_cast<int>(logits.dim(0));
+    const int C = static_cast<int>(logits.dim(1));
+
+    std::vector<float> L, T;
+    logits.download(L);
+    target.download(T);
+
+    std::vector<float> loss(N);
+    for (int i = 0; i < N; ++i) {
+        float m = L[static_cast<std::size_t>(i) * C];
+        for (int j = 1; j < C; ++j) {
+            m = std::max(m, L[static_cast<std::size_t>(i) * C + j]);
+        }
+        float s = 0.0f;
+        for (int j = 0; j < C; ++j) {
+            s += std::exp(L[static_cast<std::size_t>(i) * C + j] - m);
+        }
+        const float logsumexp = m + std::log(s);
+        const int t = static_cast<int>(T[i]);
+        loss[i] = logsumexp - L[static_cast<std::size_t>(i) * C + t];
+    }
+
+    Tensor out(dev, {N});
+    out.upload(loss);
     return out;
 }
 
