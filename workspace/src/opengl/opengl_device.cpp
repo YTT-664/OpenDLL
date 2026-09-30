@@ -2,8 +2,28 @@
 
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 namespace opendll {
+
+OpenGLBuffer::OpenGLBuffer(GLuint handle, std::size_t size, std::shared_ptr<GLState> state)
+    : handle_(handle), size_(size), state_(std::move(state)) {}
+
+OpenGLBuffer::~OpenGLBuffer() {
+    if (state_ && handle_ != 0) {
+        state_->wgl.makeCurrent();
+        state_->funcs.deleteBuffers(1, &handle_);
+    }
+}
+
+OpenGLKernel::OpenGLKernel(GLuint program, std::shared_ptr<GLState> state)
+    : program_(program), state_(std::move(state)) {}
+
+OpenGLKernel::~OpenGLKernel() {
+    if (state_ && program_ != 0) {
+        state_->funcs.deleteProgram(program_);
+    }
+}
 
 OpenGLDevice::~OpenGLDevice() = default;
 
@@ -16,25 +36,27 @@ std::unique_ptr<Device> OpenGLDevice::create() {
 }
 
 bool OpenGLDevice::init() {
-    if (!context_.create(4, 3)) {
+    state_ = std::make_shared<GLState>();
+    if (!state_->wgl.create(4, 3)) {
         return false;
     }
-    if (!context_.makeCurrent()) {
+    if (!state_->wgl.makeCurrent()) {
         return false;
     }
-    if (!gl::load(gl_)) {
+    if (!gl::load(state_->funcs)) {
         return false;
     }
+    queue_.bind(&state_->funcs, &state_->wgl);
 
     GLint v = 0;
-    gl_.getIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &v);
+    state_->funcs.getIntegerv(GL_MAX_COMPUTE_WORK_GROUP_INVOCATIONS, &v);
     info_.max_workgroup_size = static_cast<std::uint32_t>(v);
     v = 0;
-    gl_.getIntegerv(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE, &v);
+    state_->funcs.getIntegerv(GL_MAX_COMPUTE_SHARED_MEMORY_SIZE, &v);
     info_.max_shared_memory = static_cast<std::uint32_t>(v);
 
-    const char* version = reinterpret_cast<const char*>(gl_.getString(GL_VERSION));
-    const char* renderer = reinterpret_cast<const char*>(gl_.getString(GL_RENDERER));
+    const char* version = reinterpret_cast<const char*>(state_->funcs.getString(GL_VERSION));
+    const char* renderer = reinterpret_cast<const char*>(state_->funcs.getString(GL_RENDERER));
     info_.backend = Backend::OpenGL;
     info_.name = std::string("OpenGL ") + (version ? version : "?") + " / " +
                  (renderer ? renderer : "unknown renderer");
@@ -46,47 +68,47 @@ DeviceInfo OpenGLDevice::info() const {
 }
 
 std::unique_ptr<Buffer> OpenGLDevice::alloc(std::size_t bytes) {
-    context_.makeCurrent();
+    state_->wgl.makeCurrent();
     GLuint handle = 0;
-    gl_.genBuffers(1, &handle);
-    gl_.bindBuffer(GL_SHADER_STORAGE_BUFFER, handle);
-    gl_.bufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr,
-                   GL_DYNAMIC_COPY);
-    return std::make_unique<OpenGLBuffer>(handle, bytes);
+    state_->funcs.genBuffers(1, &handle);
+    state_->funcs.bindBuffer(GL_SHADER_STORAGE_BUFFER, handle);
+    state_->funcs.bufferData(GL_SHADER_STORAGE_BUFFER, static_cast<GLsizeiptr>(bytes), nullptr,
+                             GL_DYNAMIC_COPY);
+    return std::make_unique<OpenGLBuffer>(handle, bytes, state_);
 }
 
 std::unique_ptr<Kernel> OpenGLDevice::compile(const std::string& source) {
-    context_.makeCurrent();
+    state_->wgl.makeCurrent();
 
-    GLuint shader = gl_.createShader(GL_COMPUTE_SHADER);
+    GLuint shader = state_->funcs.createShader(GL_COMPUTE_SHADER);
     const char* src = source.c_str();
-    gl_.shaderSource(shader, 1, &src, nullptr);
-    gl_.compileShader(shader);
+    state_->funcs.shaderSource(shader, 1, &src, nullptr);
+    state_->funcs.compileShader(shader);
 
     GLint ok = 0;
-    gl_.getShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    state_->funcs.getShaderiv(shader, GL_COMPILE_STATUS, &ok);
     if (!ok) {
         char log[4096] = {};
-        gl_.getShaderInfoLog(shader, sizeof(log), nullptr, log);
-        gl_.deleteShader(shader);
+        state_->funcs.getShaderInfoLog(shader, sizeof(log), nullptr, log);
+        state_->funcs.deleteShader(shader);
         throw std::runtime_error(std::string("OpenGL shader compile failed: ") + log);
     }
 
-    GLuint program = gl_.createProgram();
-    gl_.attachShader(program, shader);
-    gl_.linkProgram(program);
-    gl_.deleteShader(shader);  // 链接后即可释放
+    GLuint program = state_->funcs.createProgram();
+    state_->funcs.attachShader(program, shader);
+    state_->funcs.linkProgram(program);
+    state_->funcs.deleteShader(shader);  // 链接后即可释放
 
     ok = 0;
-    gl_.getProgramiv(program, GL_LINK_STATUS, &ok);
+    state_->funcs.getProgramiv(program, GL_LINK_STATUS, &ok);
     if (!ok) {
         char log[4096] = {};
-        gl_.getProgramInfoLog(program, sizeof(log), nullptr, log);
-        gl_.deleteProgram(program);
+        state_->funcs.getProgramInfoLog(program, sizeof(log), nullptr, log);
+        state_->funcs.deleteProgram(program);
         throw std::runtime_error(std::string("OpenGL program link failed: ") + log);
     }
 
-    return std::make_unique<OpenGLKernel>(program);
+    return std::make_unique<OpenGLKernel>(program, state_);
 }
 
 void OpenGLDevice::GLQueue::upload(Buffer& dst, const void* src, std::size_t bytes,

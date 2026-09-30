@@ -2,10 +2,11 @@
 
 #include "cpu/cpu_device.hpp"
 
-#ifdef _WIN32
+#ifdef OPENDLL_ENABLE_NVOPTIMUS
 #include <windows.h>
 // 告知 NVIDIA Optimus 驱动本进程需要高性能 GPU（独显）。
 // 定义在 device_factory.cpp（始终被链接），保证符号进入最终 exe 并导出。
+// 由 CMake 选项 OPENDLL_ENABLE_NVOPTIMUS 控制（默认 ON，关闭后回落到集显）。
 extern "C" {
 __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
 }

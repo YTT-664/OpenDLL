@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstddef>
 #include <iostream>
 #include <memory>
@@ -88,7 +89,8 @@ int main() {
     const int num_train = static_cast<int>(train.labels.size());
     const int input_dim = train.rows * train.cols;
 
-    for (int epoch = 0; epoch < 10; ++epoch) {
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int epoch = 0; epoch < 20; ++epoch) {
         float total_loss = 0.0f;
         int num_batches = 0;
 
@@ -139,6 +141,9 @@ int main() {
         std::cout << "epoch " << epoch << "  loss=" << (total_loss / num_batches)
                   << "  test_acc=" << acc << "\n";
     }
+    const auto t1 = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(t1 - t0).count();
+    std::cout << "training time: " << seconds << "s\n";
 
     return 0;
 }

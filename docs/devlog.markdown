@@ -263,6 +263,40 @@ loss 单调下降、测试准确率单调上升至 86%，反向传播梯度正�
 
 > 备注：`WGL_NV_gpu_affinity` 是程序级 GPU 枚举扩展，已被移除；`NvOptimusEnablement` 是 Optimus 调度开关，二者机制不同、后者在新驱动仍有效。
 
+## 内存/显存泄漏修复
+
+> 日期：2026-09-30
+
+### 现象
+
+MLP 训练（很小的模型与数据集）一度将 32GB 内存占满，4060 模式下独显显存占用约 6.8GB。
+
+### 根因
+
+M0 时 `OpenGLBuffer` / `OpenGLKernel` 析构**未调用 `glDeleteBuffers` / `glDeleteProgram`**（当时简化设计为「GL 资源随上下文销毁统一回收」）。训练循环每个 batch 创建约 10 个临时 Tensor，对应的 GL buffer（SSBO）永不释放：
+
+- 18740 batch × ~800KB/batch ≈ 十几 GB 显存累积
+- 溢出 4060 的 4GB 显存后，驱动换页到系统内存 → 32GB 内存被占满
+- 内存抖动同时拖慢了训练
+
+### 修复
+
+1. 引入 `struct GLState { Funcs funcs; WGLContext wgl; }`，用 `shared_ptr<GLState>` 共享。
+2. `OpenGLBuffer::~` 调用 `glDeleteBuffers`，`OpenGLKernel::~` 调用 `glDeleteProgram`。
+3. `shared_ptr` 保证 Buffer/Kernel 析构时上下文仍存活（即使 Device 先析构、或 static 缓存资源后析构），杜绝生命周期悬空。
+
+## 独显 vs 集显性能对比（20 epoch）
+
+> 日期：2026-09-30
+> 模型：MLP 784→128→ReLU→10，batch 64，FashionMNIST
+
+| 后端 | 修复前耗时 | 修复后耗时 | 最终 acc |
+| --- | --- | --- | --- |
+| NVIDIA RTX 4060 | 312.9s | 89.1s | 87.09% |
+| Intel Arc 集显 | 153.9s | 158.2s | 87.10% |
+
+修复后 **4060 比集显快 1.78×**。修复前 4060 反而慢是内存泄漏假象（PCIe 传输 + 换页开销掩盖了算力优势）。
+
 ### 下一步（M4）
 
 复现 ResNet18（conv + batchnorm + 残差连接 + global avg pool）。

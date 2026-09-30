@@ -4,6 +4,9 @@ project(OpenDLL LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# 是否把 OpenGL 后端路由到 NVIDIA 独显（Optimus）。默认 ON；关闭后回落集显。
+option(OPENDLL_ENABLE_NVOPTIMUS "Route OpenGL backend to NVIDIA discrete GPU" ON)
+
 add_library(opendll
     src/device_factory.cpp
     src/cpu/cpu_device.cpp
@@ -15,6 +18,10 @@ add_library(opendll
     src/dataset.cpp
 )
 target_include_directories(opendll PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+if(OPENDLL_ENABLE_NVOPTIMUS AND WIN32)
+    target_compile_definitions(opendll PUBLIC OPENDLL_ENABLE_NVOPTIMUS)
+endif()
 
 # OpenGL 后端（WGL）仅在 Windows 下编译
 if(WIN32)
