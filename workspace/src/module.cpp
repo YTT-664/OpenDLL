@@ -140,22 +140,12 @@ BatchNorm2d::BatchNorm2d(Device& dev, int num_features, float eps, float momentu
 
 Tensor BatchNorm2d::forward(const Tensor& x) {
     input_ = x;
-    const int C = static_cast<int>(x.dim(1));
 
     if (training_) {
         bn_forward_stats(dev_, x, batch_mean_, batch_var_);
-        // 更新 running stats（CPU 端，C 个元素，开销小）
-        std::vector<float> bm, bv, rm, rv;
-        batch_mean_.download(bm);
-        batch_var_.download(bv);
-        running_mean_.download(rm);
-        running_var_.download(rv);
-        for (int c = 0; c < C; ++c) {
-            rm[c] = (1.0f - momentum_) * rm[c] + momentum_ * bm[c];
-            rv[c] = (1.0f - momentum_) * rv[c] + momentum_ * bv[c];
-        }
-        running_mean_.upload(rm);
-        running_var_.upload(rv);
+        // running stats 的 EMA 更新在设备端就地完成，避免逐 batch 下载统计量
+        bn_update_running_stats(dev_, running_mean_, running_var_, batch_mean_, batch_var_,
+                                momentum_);
         return batchnorm2d(dev_, x, gamma_, beta_, batch_mean_, batch_var_, eps_);
     }
     return batchnorm2d(dev_, x, gamma_, beta_, running_mean_, running_var_, eps_);

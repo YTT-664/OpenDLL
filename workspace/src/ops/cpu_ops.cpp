@@ -410,6 +410,22 @@ void sgd_update(Tensor& param, const Tensor& grad, float lr) {
     param.upload(p);
 }
 
+void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
+                             const Tensor& batch_mean, const Tensor& batch_var,
+                             float momentum) {
+    std::vector<float> rm, rv, bm, bv;
+    running_mean.download(rm);
+    running_var.download(rv);
+    batch_mean.download(bm);
+    batch_var.download(bv);
+    for (std::size_t i = 0; i < rm.size(); ++i) {
+        rm[i] = (1.0f - momentum) * rm[i] + momentum * bm[i];
+        rv[i] = (1.0f - momentum) * rv[i] + momentum * bv[i];
+    }
+    running_mean.upload(rm);
+    running_var.upload(rv);
+}
+
 Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
                          const Tensor& w, int stride, int padding) {
     const int N = static_cast<int>(x.dim(0));

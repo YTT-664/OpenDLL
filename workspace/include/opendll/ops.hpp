@@ -61,6 +61,12 @@ Tensor sum_axis0(Device& dev, const Tensor& x);
 // 计算 batch mean / var（batchnorm 训练模式）。x: [N, C, H, W] -> mean[C], var[C]（有偏方差）
 void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var);
 
+// 就地更新 running stats：running = (1 - momentum) * running + momentum * batch。
+// 各张量均为 [C]。在设备端执行，避免逐 batch 下载统计量。
+void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
+                             const Tensor& batch_mean, const Tensor& batch_var,
+                             float momentum);
+
 // in-place SGD 更新：param -= lr * grad（在设备端执行，避免逐 batch 下载/上传参数）
 void sgd_update(Tensor& param, const Tensor& grad, float lr);
 

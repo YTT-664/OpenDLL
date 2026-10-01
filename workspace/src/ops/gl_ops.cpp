@@ -459,6 +459,24 @@ void main() {
 }
 )";
 
+// batchnorm running stats 的 EMA 更新（就地）：running = (1-momentum)*running + momentum*batch。
+const char* kBnUpdateRunningSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Rm { float rm[]; };  // running_mean（就地）
+layout(std430, binding = 1) buffer Rv { float rv[]; };  // running_var（就地）
+layout(std430, binding = 2) buffer Bm { float bm[]; };  // batch_mean
+layout(std430, binding = 3) buffer Bv { float bv[]; };  // batch_var
+layout(std430, binding = 4) buffer Params { float momentum; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < rm.length()) {
+        rm[idx] = (1.0 - momentum) * rm[idx] + momentum * bm[idx];
+        rv[idx] = (1.0 - momentum) * rv[idx] + momentum * bv[idx];
+    }
+}
+)";
+
 // conv2d 反向：对输入梯度。
 const char* kConv2dGradInputSrc = R"(
 #version 430 core
@@ -567,25 +585,44 @@ layout(std430, binding = 4) buffer GGb { float gg[]; };
 layout(std430, binding = 5) buffer GBb { float gb[]; };
 layout(std430, binding = 6) buffer Stb { float stats[]; };
 layout(std430, binding = 7) buffer Params { int N; int C; int HW; float eps; };
+shared float s_gy[256];
+shared float s_gyx[256];
 void main() {
-    uint c = gl_GlobalInvocationID.x;
-    if (int(c) >= C) return;
+    int c = int(gl_WorkGroupID.x);       // 每个 workgroup 负责一个 channel
+    int tid = int(gl_LocalInvocationID.x);
+    int M = N * HW;
     float inv_std = 1.0 / sqrt(var[c] + eps);
-    float sum_gy = 0.0;
-    float sum_gy_xhat = 0.0;
-    for (int n = 0; n < N; ++n) {
-        for (int i = 0; i < HW; ++i) {
-            int idx = (n * C + int(c)) * HW + i;
-            float xhat = (x[idx] - mean[c]) * inv_std;
-            float gy = go[idx];
-            sum_gy += gy;
-            sum_gy_xhat += gy * xhat;
-        }
+
+    float local_gy = 0.0;
+    float local_gyx = 0.0;
+    for (int i = tid; i < M; i += 256) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        int idx = (n * C + c) * HW + hw;
+        float xhat = (x[idx] - mean[c]) * inv_std;
+        float gy = go[idx];
+        local_gy += gy;
+        local_gyx += gy * xhat;
     }
-    gg[c] += sum_gy_xhat;
-    gb[c] += sum_gy;
-    stats[c] = sum_gy;
-    stats[C + c] = sum_gy_xhat;
+
+    s_gy[tid] = local_gy;
+    s_gyx[tid] = local_gyx;
+    barrier();
+
+    for (int s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_gy[tid] += s_gy[tid + s];
+            s_gyx[tid] += s_gyx[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        gg[c] += s_gyx[0];
+        gb[c] += s_gy[0];
+        stats[c] = s_gy[0];
+        stats[C + c] = s_gyx[0];
+    }
 }
 )";
 
@@ -624,22 +661,41 @@ layout(std430, binding = 0) buffer Xb { float x[]; };
 layout(std430, binding = 1) buffer Mb { float mean[]; };
 layout(std430, binding = 2) buffer Vb { float var[]; };
 layout(std430, binding = 3) buffer Params { int N; int C; int HW; };
+shared float s_sum[256];
+shared float s_sum2[256];
 void main() {
-    uint c = gl_GlobalInvocationID.x;
-    if (int(c) >= C) return;
-    float sum = 0.0;
-    float sum2 = 0.0;
-    for (int n = 0; n < N; ++n) {
-        for (int i = 0; i < HW; ++i) {
-            int idx = (n * C + int(c)) * HW + i;
-            sum += x[idx];
-            sum2 += x[idx] * x[idx];
-        }
+    int c = int(gl_WorkGroupID.x);       // 每个 workgroup 负责一个 channel
+    int tid = int(gl_LocalInvocationID.x);
+    int M = N * HW;
+
+    float local_sum = 0.0;
+    float local_sum2 = 0.0;
+    for (int i = tid; i < M; i += 256) {
+        int n = i / HW;
+        int hw = i - n * HW;
+        int idx = (n * C + c) * HW + hw;
+        float v = x[idx];
+        local_sum += v;
+        local_sum2 += v * v;
     }
-    float M = float(N * HW);
-    float mu = sum / M;
-    mean[c] = mu;
-    var[c] = sum2 / M - mu * mu;
+
+    s_sum[tid] = local_sum;
+    s_sum2[tid] = local_sum2;
+    barrier();
+
+    for (int s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            s_sum[tid] += s_sum[tid + s];
+            s_sum2[tid] += s_sum2[tid + s];
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        float mu = s_sum[0] / float(M);
+        mean[c] = mu;
+        var[c] = s_sum2[0] / float(M) - mu * mu;
+    }
 }
 )";
 
@@ -729,6 +785,7 @@ struct Cache {
     std::unique_ptr<Kernel> bn_backward_stats;
     std::unique_ptr<Kernel> bn_backward_gradx;
     std::unique_ptr<Kernel> bn_fwd_stats;
+    std::unique_ptr<Kernel> bn_update_running;
     std::unique_ptr<Kernel> col2im;
     std::unique_ptr<Kernel> grad_out_reshape;
     std::unique_ptr<Buffer> params;        // matmul 的 {M, N, K}
@@ -743,6 +800,7 @@ struct Cache {
     std::unique_ptr<Buffer> conv_bwd_params;   // 11 个 int（grad_input/grad_weight 复用）
     std::unique_ptr<Buffer> conv_bias_params;  // 4 个 int
     std::unique_ptr<Buffer> bn_fwd_params;     // 3 个 int（N, C, HW）
+    std::unique_ptr<Buffer> bn_running_params; // 1 float（momentum）
     std::unique_ptr<Buffer> bn_bwd_params;     // 3 int + 1 float
     std::unique_ptr<Buffer> bn_stats_buf;      // 2*C float（sum_gy / sum_gy_xhat）
     std::unique_ptr<Buffer> col2im_params;     // 11 个 int
@@ -1240,7 +1298,7 @@ Tensor batchnorm_backward(Device& dev, const Tensor& x, const Tensor& grad_out,
             {5u, &grad_beta.buffer()}, {6u, cache.bn_stats_buf.get()},
             {7u, cache.bn_bwd_params.get()},
         };
-        const std::uint32_t wg = (static_cast<std::uint32_t>(C) + 255u) / 256u;
+        const std::uint32_t wg = static_cast<std::uint32_t>(C);  // 每 channel 一个 workgroup
         dev.main_queue().dispatch(*k_stats, wg, 1, 1, bindings);
     }
 
@@ -1281,8 +1339,30 @@ void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var) {
         {2u, &var.buffer()},
         {3u, cache.bn_fwd_params.get()},
     };
-    const std::uint32_t wg = (static_cast<std::uint32_t>(C) + 255u) / 256u;
+    const std::uint32_t wg = static_cast<std::uint32_t>(C);  // 每 channel 一个 workgroup
     dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+}
+
+void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
+                             const Tensor& batch_mean, const Tensor& batch_var,
+                             float momentum) {
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.bn_update_running, kBnUpdateRunningSrc);
+    if (!cache.bn_running_params) {
+        cache.bn_running_params = dev.alloc(sizeof(float));
+    }
+    dev.main_queue().upload(*cache.bn_running_params, &momentum, sizeof(momentum));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &running_mean.buffer()},
+        {1u, &running_var.buffer()},
+        {2u, &batch_mean.buffer()},
+        {3u, &batch_var.buffer()},
+        {4u, cache.bn_running_params.get()},
+    };
+    const std::uint32_t gx =
+        static_cast<std::uint32_t>((running_mean.numel() + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
 }
 
 Tensor col2im(Device& dev, const Tensor& col, int N, int Cin, int H, int W,

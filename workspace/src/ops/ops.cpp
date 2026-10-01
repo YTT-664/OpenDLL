@@ -207,6 +207,20 @@ void sgd_update(Tensor& param, const Tensor& grad, float lr) {
     cpu_ops::sgd_update(param, grad, lr);
 }
 
+void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
+                             const Tensor& batch_mean, const Tensor& batch_var,
+                             float momentum) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        gl_ops::bn_update_running_stats(dev, running_mean, running_var, batch_mean,
+                                        batch_var, momentum);
+        return;
+    }
+#endif
+    cpu_ops::bn_update_running_stats(dev, running_mean, running_var, batch_mean, batch_var,
+                                     momentum);
+}
+
 Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
                          const Tensor& w, int stride, int padding) {
 #ifdef OPENDLL_HAS_OPENGL

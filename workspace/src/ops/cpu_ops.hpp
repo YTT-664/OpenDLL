@@ -25,6 +25,9 @@ Tensor cross_entropy_backward(Device& dev, const Tensor& logits, const Tensor& t
 Tensor transpose(Device& dev, const Tensor& x);
 Tensor sum_axis0(Device& dev, const Tensor& x);
 void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var);
+void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
+                             const Tensor& batch_mean, const Tensor& batch_var,
+                             float momentum);
 void sgd_update(Tensor& param, const Tensor& grad, float lr);
 Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
                          const Tensor& w, int stride, int padding);

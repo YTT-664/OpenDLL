@@ -53,6 +53,9 @@ target_link_libraries(train_mlp PRIVATE opendll)
 add_executable(train_resnet examples/train_resnet.cpp)
 target_link_libraries(train_resnet PRIVATE opendll)
 
+add_executable(profile_resnet examples/profile_resnet.cpp)
+target_link_libraries(profile_resnet PRIVATE opendll)
+
 # GPU 独显测试（WGL_NV_gpu_affinity，仅 Windows）
 if(WIN32)
     add_executable(test_gpu examples/test_gpu.cpp)
