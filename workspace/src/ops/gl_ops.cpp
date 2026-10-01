@@ -14,20 +14,39 @@ namespace {
 
 const char* kMatmulSrc = R"(
 #version 430 core
-layout(local_size_x = 8, local_size_y = 8) in;
-layout(std430, binding = 0) buffer A { float a[]; };
-layout(std430, binding = 1) buffer B { float b[]; };
-layout(std430, binding = 2) buffer C { float c[]; };
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer A { float a[]; };  // [M, K]
+layout(std430, binding = 1) buffer B { float b[]; };  // [K, N]
+layout(std430, binding = 2) buffer C { float c[]; };  // [M, N]
 layout(std430, binding = 3) buffer Params { uint M; uint N; uint K; };
+shared float As[16][16];
+shared float Bs[16][16];
 void main() {
-    uint row = gl_GlobalInvocationID.y;
-    uint col = gl_GlobalInvocationID.x;
-    if (row >= M || col >= N) return;
+    uint g_row = gl_GlobalInvocationID.y;  // m
+    uint g_col = gl_GlobalInvocationID.x;  // n
+    uint l_row = gl_LocalInvocationID.y;
+    uint l_col = gl_LocalInvocationID.x;
     float sum = 0.0;
-    for (uint k = 0; k < K; ++k) {
-        sum += a[row * K + k] * b[k * N + col];
+    for (uint t = 0u; t < K; t += 16u) {
+        if (g_row < M && (t + l_col) < K) {
+            As[l_row][l_col] = a[g_row * K + t + l_col];
+        } else {
+            As[l_row][l_col] = 0.0;
+        }
+        if ((t + l_row) < K && g_col < N) {
+            Bs[l_row][l_col] = b[(t + l_row) * N + g_col];
+        } else {
+            Bs[l_row][l_col] = 0.0;
+        }
+        barrier();
+        for (uint k = 0u; k < 16u; ++k) {
+            sum += As[l_row][k] * Bs[k][l_col];
+        }
+        barrier();
     }
-    c[row * N + col] = sum;
+    if (g_row < M && g_col < N) {
+        c[g_row * N + g_col] = sum;
+    }
 }
 )";
 
@@ -758,6 +777,86 @@ void main() {
 }
 )";
 
+// grad_input 的融合转置 GEMM：grad_col[k, p] = sum_c w[c, k] * grad_Y[p, c]。
+// 直接读 w[Cout,Kcol] 与 grad_Y[Ncol,Cout] 的原始布局，免去两次显式 transpose。
+const char* kGradInputGemmSrc = R"(
+#version 430 core
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer Wb { float w[]; };   // [Cout, Kcol]
+layout(std430, binding = 1) buffer GYb { float gy[]; }; // [Ncol, Cout]
+layout(std430, binding = 2) buffer GCb { float gc[]; }; // [Kcol, Ncol]
+layout(std430, binding = 3) buffer Params { int Cout; int Kcol; int Ncol; };
+shared float Ws[16][16];
+shared float GYs[16][16];
+void main() {
+    uint g_row = gl_GlobalInvocationID.y;  // k
+    uint g_col = gl_GlobalInvocationID.x;  // p
+    uint l_row = gl_LocalInvocationID.y;
+    uint l_col = gl_LocalInvocationID.x;
+    float sum = 0.0;
+    for (int t = 0; t < Cout; t += 16) {
+        if ((t + int(l_col)) < Cout && g_row < uint(Kcol)) {
+            Ws[l_row][l_col] = w[(t + l_col) * Kcol + g_row];
+        } else {
+            Ws[l_row][l_col] = 0.0;
+        }
+        if ((t + int(l_row)) < Cout && g_col < uint(Ncol)) {
+            GYs[l_row][l_col] = gy[g_col * Cout + (t + l_row)];
+        } else {
+            GYs[l_row][l_col] = 0.0;
+        }
+        barrier();
+        for (int k = 0; k < 16; ++k) {
+            sum += Ws[l_row][k] * GYs[k][l_col];
+        }
+        barrier();
+    }
+    if (g_row < uint(Kcol) && g_col < uint(Ncol)) {
+        gc[g_row * Ncol + g_col] = sum;
+    }
+}
+)";
+
+// grad_weight 的融合转置 GEMM：grad_W[c, k] = sum_p col[k, p] * grad_Y[p, c]。
+// 直接读 col[Kcol,Ncol] 与 grad_Y[Ncol,Cout] 的原始布局，免去一次显式 transpose。
+const char* kGradWeightGemmSrc = R"(
+#version 430 core
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer Cb { float col[]; };  // [Kcol, Ncol]
+layout(std430, binding = 1) buffer GYb { float gy[]; };  // [Ncol, Cout]
+layout(std430, binding = 2) buffer GWb { float gw[]; };  // [Cout, Kcol]
+layout(std430, binding = 3) buffer Params { int Ncol; int Cout; int Kcol; };
+shared float As[16][16];
+shared float Bs[16][16];
+void main() {
+    uint g_row = gl_GlobalInvocationID.y;  // c
+    uint g_col = gl_GlobalInvocationID.x;  // k
+    uint l_row = gl_LocalInvocationID.y;
+    uint l_col = gl_LocalInvocationID.x;
+    float sum = 0.0;
+    for (int t = 0; t < Ncol; t += 16) {
+        if ((t + int(l_col)) < Ncol && g_row < uint(Cout)) {
+            As[l_row][l_col] = gy[(t + l_col) * Cout + g_row];
+        } else {
+            As[l_row][l_col] = 0.0;
+        }
+        if ((t + int(l_row)) < Ncol && g_col < uint(Kcol)) {
+            Bs[l_row][l_col] = col[g_col * Ncol + (t + l_row)];
+        } else {
+            Bs[l_row][l_col] = 0.0;
+        }
+        barrier();
+        for (int k = 0; k < 16; ++k) {
+            sum += As[l_row][k] * Bs[k][l_col];
+        }
+        barrier();
+    }
+    if (g_row < uint(Cout) && g_col < uint(Kcol)) {
+        gw[g_row * Kcol + g_col] = sum;
+    }
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -782,6 +881,8 @@ struct Cache {
     std::unique_ptr<Kernel> conv2d_grad_input;
     std::unique_ptr<Kernel> conv2d_grad_weight;
     std::unique_ptr<Kernel> conv2d_grad_bias;
+    std::unique_ptr<Kernel> grad_input_gemm;
+    std::unique_ptr<Kernel> grad_weight_gemm;
     std::unique_ptr<Kernel> bn_backward_stats;
     std::unique_ptr<Kernel> bn_backward_gradx;
     std::unique_ptr<Kernel> bn_fwd_stats;
@@ -799,6 +900,7 @@ struct Cache {
     std::unique_ptr<Buffer> sgd_params;    // 1 float（lr）
     std::unique_ptr<Buffer> conv_bwd_params;   // 11 个 int（grad_input/grad_weight 复用）
     std::unique_ptr<Buffer> conv_bias_params;  // 4 个 int
+    std::unique_ptr<Buffer> grad_gemm_params;  // 3 个 int（grad_input/grad_weight GEMM 复用）
     std::unique_ptr<Buffer> bn_fwd_params;     // 3 个 int（N, C, HW）
     std::unique_ptr<Buffer> bn_running_params; // 1 float（momentum）
     std::unique_ptr<Buffer> bn_bwd_params;     // 3 int + 1 float
@@ -845,8 +947,8 @@ Tensor matmul(Device& dev, const Tensor& a, const Tensor& b) {
         {2u, &c.buffer()},
         {3u, cache.params.get()},
     };
-    const std::uint32_t gx = (N + 7u) / 8u;
-    const std::uint32_t gy = (M + 7u) / 8u;
+    const std::uint32_t gx = (N + 15u) / 16u;
+    const std::uint32_t gy = (M + 15u) / 16u;
     dev.main_queue().dispatch(*kernel, gx, gy, 1, bindings);
     return c;
 }
@@ -1215,28 +1317,73 @@ Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
     const std::int32_t Cout = static_cast<std::int32_t>(w.dim(0));
     const std::int32_t KH = static_cast<std::int32_t>(w.dim(2));
     const std::int32_t KW = static_cast<std::int32_t>(w.dim(3));
+    const std::int32_t Kcol = Cin * KH * KW;
+    const std::int32_t Hout = (H + 2 * padding - KH) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - KW) / stride + 1;
+    const std::int32_t Ncol = N * Hout * Wout;
 
-    // grad_col = W^T @ grad_Y^T = matmul(transpose(W), transpose(grad_Y))
-    Tensor grad_Y = grad_out_reshape(dev, grad_out);                 // [Ncol, Cout]
-    Tensor w_view = w.view({Cout, Cin * KH * KW});                   // [Cout, Kcol]
-    Tensor w_T = transpose(dev, w_view);                             // [Kcol, Cout]
-    Tensor grad_Y_T = transpose(dev, grad_Y);                        // [Cout, Ncol]
-    Tensor grad_col = matmul(dev, w_T, grad_Y_T);                    // [Kcol, Ncol]
+    auto& cache = cache_for(dev);
+    Tensor grad_Y = grad_out_reshape(dev, grad_out);   // [Ncol, Cout]
+    Tensor grad_col(dev, {Kcol, Ncol});                // [Kcol, Ncol]
+
+    // grad_col[k, p] = sum_c w[c, k] * grad_Y[p, c]（融合转置 GEMM，免去两次 transpose）
+    Kernel* k = get_or_compile(dev, cache.grad_input_gemm, kGradInputGemmSrc);
+    if (!cache.grad_gemm_params) {
+        cache.grad_gemm_params = dev.alloc(3 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[3] = {Cout, Kcol, Ncol};
+    dev.main_queue().upload(*cache.grad_gemm_params, params, sizeof(params));
+    {
+        const std::vector<BufferBinding> bindings = {
+            {0u, &w.buffer()},
+            {1u, &grad_Y.buffer()},
+            {2u, &grad_col.buffer()},
+            {3u, cache.grad_gemm_params.get()},
+        };
+        const std::uint32_t gx = (static_cast<std::uint32_t>(Ncol) + 15u) / 16u;
+        const std::uint32_t gy = (static_cast<std::uint32_t>(Kcol) + 15u) / 16u;
+        dev.main_queue().dispatch(*k, gx, gy, 1, bindings);
+    }
     return col2im(dev, grad_col, N, Cin, H, W, KH, KW, stride, padding);
 }
 
 Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,
                           const Tensor& w, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
     const std::int32_t Cin = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
     const std::int32_t Cout = static_cast<std::int32_t>(w.dim(0));
     const std::int32_t KH = static_cast<std::int32_t>(w.dim(2));
     const std::int32_t KW = static_cast<std::int32_t>(w.dim(3));
+    const std::int32_t Kcol = Cin * KH * KW;
+    const std::int32_t Hout = (H + 2 * padding - KH) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - KW) / stride + 1;
+    const std::int32_t Ncol = N * Hout * Wout;
 
-    // grad_W^T = col @ grad_Y = matmul(im2col(x), grad_out_reshape(grad_out))
-    Tensor col = im2col(dev, x, KH, KW, stride, padding);            // [Kcol, Ncol]
-    Tensor grad_Y = grad_out_reshape(dev, grad_out);                 // [Ncol, Cout]
-    Tensor grad_W_T = matmul(dev, col, grad_Y);                      // [Kcol, Cout]
-    Tensor grad_W = transpose(dev, grad_W_T);                        // [Cout, Kcol]
+    auto& cache = cache_for(dev);
+    Tensor col = im2col(dev, x, KH, KW, stride, padding);  // [Kcol, Ncol]
+    Tensor grad_Y = grad_out_reshape(dev, grad_out);        // [Ncol, Cout]
+    Tensor grad_W(dev, {Cout, Kcol});
+
+    // grad_W[c, k] = sum_p col[k, p] * grad_Y[p, c]（融合转置 GEMM，免去一次 transpose）
+    Kernel* k = get_or_compile(dev, cache.grad_weight_gemm, kGradWeightGemmSrc);
+    if (!cache.grad_gemm_params) {
+        cache.grad_gemm_params = dev.alloc(3 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[3] = {Ncol, Cout, Kcol};
+    dev.main_queue().upload(*cache.grad_gemm_params, params, sizeof(params));
+    {
+        const std::vector<BufferBinding> bindings = {
+            {0u, &col.buffer()},
+            {1u, &grad_Y.buffer()},
+            {2u, &grad_W.buffer()},
+            {3u, cache.grad_gemm_params.get()},
+        };
+        const std::uint32_t gx = (static_cast<std::uint32_t>(Kcol) + 15u) / 16u;
+        const std::uint32_t gy = (static_cast<std::uint32_t>(Cout) + 15u) / 16u;
+        dev.main_queue().dispatch(*k, gx, gy, 1, bindings);
+    }
     return grad_W.view({Cout, Cin, KH, KW});
 }
 
