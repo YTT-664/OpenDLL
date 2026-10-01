@@ -400,4 +400,355 @@ Tensor sum_axis0(Device& dev, const Tensor& x) {
     return out;
 }
 
+void sgd_update(Tensor& param, const Tensor& grad, float lr) {
+    std::vector<float> p, g;
+    param.download(p);
+    grad.download(g);
+    for (std::size_t i = 0; i < p.size(); ++i) {
+        p[i] -= lr * g[i];
+    }
+    param.upload(p);
+}
+
+Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
+                         const Tensor& w, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int Cin = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Cout = static_cast<int>(w.dim(0));
+    const int KH = static_cast<int>(w.dim(2));
+    const int KW = static_cast<int>(w.dim(3));
+    const int Hout = static_cast<int>(grad_out.dim(2));
+    const int Wout = static_cast<int>(grad_out.dim(3));
+
+    std::vector<float> GO, Wt;
+    grad_out.download(GO);
+    w.download(Wt);
+
+    std::vector<float> GX(static_cast<std::size_t>(N) * Cin * H * W, 0.0f);
+    for (int n = 0; n < N; ++n) {
+        for (int ci = 0; ci < Cin; ++ci) {
+            for (int ih = 0; ih < H; ++ih) {
+                for (int iw = 0; iw < W; ++iw) {
+                    float sum = 0.0f;
+                    for (int co = 0; co < Cout; ++co) {
+                        for (int kh = 0; kh < KH; ++kh) {
+                            const int num_h = ih + padding - kh;
+                            if (num_h % stride != 0) {
+                                continue;
+                            }
+                            const int oh = num_h / stride;
+                            if (oh < 0 || oh >= Hout) {
+                                continue;
+                            }
+                            for (int kw = 0; kw < KW; ++kw) {
+                                const int num_w = iw + padding - kw;
+                                if (num_w % stride != 0) {
+                                    continue;
+                                }
+                                const int ow = num_w / stride;
+                                if (ow < 0 || ow >= Wout) {
+                                    continue;
+                                }
+                                sum += GO[((static_cast<std::size_t>(n) * Cout + co) * Hout + oh) *
+                                              Wout +
+                                          ow] *
+                                       Wt[((static_cast<std::size_t>(co) * Cin + ci) * KH + kh) *
+                                              KW +
+                                          kw];
+                            }
+                        }
+                    }
+                    GX[((static_cast<std::size_t>(n) * Cin + ci) * H + ih) * W + iw] = sum;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, Cin, H, W});
+    out.upload(GX);
+    return out;
+}
+
+Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          const Tensor& w, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int Cin = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Cout = static_cast<int>(w.dim(0));
+    const int KH = static_cast<int>(w.dim(2));
+    const int KW = static_cast<int>(w.dim(3));
+    const int Hout = static_cast<int>(grad_out.dim(2));
+    const int Wout = static_cast<int>(grad_out.dim(3));
+
+    std::vector<float> GO, X;
+    grad_out.download(GO);
+    x.download(X);
+
+    std::vector<float> GW(static_cast<std::size_t>(Cout) * Cin * KH * KW, 0.0f);
+    for (int co = 0; co < Cout; ++co) {
+        for (int ci = 0; ci < Cin; ++ci) {
+            for (int kh = 0; kh < KH; ++kh) {
+                for (int kw = 0; kw < KW; ++kw) {
+                    float sum = 0.0f;
+                    for (int n = 0; n < N; ++n) {
+                        for (int oh = 0; oh < Hout; ++oh) {
+                            const int ih = oh * stride - padding + kh;
+                            if (ih < 0 || ih >= H) {
+                                continue;
+                            }
+                            for (int ow = 0; ow < Wout; ++ow) {
+                                const int iw = ow * stride - padding + kw;
+                                if (iw < 0 || iw >= W) {
+                                    continue;
+                                }
+                                sum += GO[((static_cast<std::size_t>(n) * Cout + co) * Hout + oh) *
+                                              Wout +
+                                          ow] *
+                                       X[((static_cast<std::size_t>(n) * Cin + ci) * H + ih) * W +
+                                         iw];
+                            }
+                        }
+                    }
+                    GW[((static_cast<std::size_t>(co) * Cin + ci) * KH + kh) * KW + kw] = sum;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {Cout, Cin, KH, KW});
+    out.upload(GW);
+    return out;
+}
+
+Tensor conv2d_grad_bias(Device& dev, const Tensor& grad_out) {
+    const int N = static_cast<int>(grad_out.dim(0));
+    const int Cout = static_cast<int>(grad_out.dim(1));
+    const int Hout = static_cast<int>(grad_out.dim(2));
+    const int Wout = static_cast<int>(grad_out.dim(3));
+
+    std::vector<float> GO;
+    grad_out.download(GO);
+    std::vector<float> GB(Cout, 0.0f);
+    for (int n = 0; n < N; ++n) {
+        for (int co = 0; co < Cout; ++co) {
+            for (int oh = 0; oh < Hout; ++oh) {
+                for (int ow = 0; ow < Wout; ++ow) {
+                    GB[co] += GO[((static_cast<std::size_t>(n) * Cout + co) * Hout + oh) * Wout +
+                                 ow];
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {Cout});
+    out.upload(GB);
+    return out;
+}
+
+Tensor batchnorm_backward(Device& dev, const Tensor& x, const Tensor& grad_out,
+                          const Tensor& gamma, const Tensor& mean, const Tensor& var,
+                          float eps, Tensor& grad_gamma, Tensor& grad_beta) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int HW = H * W;
+    const float M = static_cast<float>(N) * HW;
+
+    std::vector<float> X, GO, G, MEAN, VAR, GG, GB;
+    x.download(X);
+    grad_out.download(GO);
+    gamma.download(G);
+    mean.download(MEAN);
+    var.download(VAR);
+    grad_gamma.download(GG);
+    grad_beta.download(GB);
+
+    std::vector<float> GX(X.size(), 0.0f);
+
+    for (int c = 0; c < C; ++c) {
+        const float inv_std = 1.0f / std::sqrt(VAR[c] + eps);
+        float sum_gy = 0.0f;
+        float sum_gy_xhat = 0.0f;
+        for (int n = 0; n < N; ++n) {
+            for (int i = 0; i < HW; ++i) {
+                const std::size_t idx = (static_cast<std::size_t>(n) * C + c) * HW + i;
+                const float xhat = (X[idx] - MEAN[c]) * inv_std;
+                const float gy = GO[idx];
+                sum_gy += gy;
+                sum_gy_xhat += gy * xhat;
+            }
+        }
+        GG[c] += sum_gy_xhat;
+        GB[c] += sum_gy;
+
+        for (int n = 0; n < N; ++n) {
+            for (int i = 0; i < HW; ++i) {
+                const std::size_t idx = (static_cast<std::size_t>(n) * C + c) * HW + i;
+                const float xhat = (X[idx] - MEAN[c]) * inv_std;
+                const float gy = GO[idx];
+                GX[idx] = inv_std * G[c] * (gy - sum_gy / M - xhat * sum_gy_xhat / M);
+            }
+        }
+    }
+
+    grad_gamma.upload(GG);
+    grad_beta.upload(GB);
+
+    Tensor out(dev, x.shape());
+    out.upload(GX);
+    return out;
+}
+
+void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int HW = H * W;
+    const float M = static_cast<float>(N) * HW;
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> MEAN(C), VAR(C);
+    for (int c = 0; c < C; ++c) {
+        float sum = 0.0f;
+        float sum2 = 0.0f;
+        for (int n = 0; n < N; ++n) {
+            for (int i = 0; i < HW; ++i) {
+                const float v = X[(static_cast<std::size_t>(n) * C + c) * HW + i];
+                sum += v;
+                sum2 += v * v;
+            }
+        }
+        const float mu = sum / M;
+        MEAN[c] = mu;
+        VAR[c] = sum2 / M - mu * mu;
+    }
+    mean.upload(MEAN);
+    var.upload(VAR);
+}
+
+Tensor col2im(Device& dev, const Tensor& col, int N, int Cin, int H, int W,
+              int KH, int KW, int stride, int padding) {
+    const int Hout = (H + 2 * padding - KH) / stride + 1;
+    const int Wout = (W + 2 * padding - KW) / stride + 1;
+    const int Kcol = Cin * KH * KW;
+    const int Ncol = N * Hout * Wout;
+
+    std::vector<float> COL;
+    col.download(COL);
+    std::vector<float> GX(static_cast<std::size_t>(N) * Cin * H * W, 0.0f);
+
+    for (int n = 0; n < N; ++n) {
+        for (int ci = 0; ci < Cin; ++ci) {
+            for (int ih = 0; ih < H; ++ih) {
+                for (int iw = 0; iw < W; ++iw) {
+                    float sum = 0.0f;
+                    for (int kh = 0; kh < KH; ++kh) {
+                        const int num_h = ih + padding - kh;
+                        if (num_h % stride != 0) {
+                            continue;
+                        }
+                        const int oh = num_h / stride;
+                        if (oh < 0 || oh >= Hout) {
+                            continue;
+                        }
+                        for (int kw = 0; kw < KW; ++kw) {
+                            const int num_w = iw + padding - kw;
+                            if (num_w % stride != 0) {
+                                continue;
+                            }
+                            const int ow = num_w / stride;
+                            if (ow < 0 || ow >= Wout) {
+                                continue;
+                            }
+                            const int p = (n * Hout + oh) * Wout + ow;
+                            const int k = (ci * KH + kh) * KW + kw;
+                            sum += COL[static_cast<std::size_t>(k) * Ncol + p];
+                        }
+                    }
+                    GX[((static_cast<std::size_t>(n) * Cin + ci) * H + ih) * W + iw] = sum;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, Cin, H, W});
+    out.upload(GX);
+    return out;
+}
+
+Tensor grad_out_reshape(Device& dev, const Tensor& grad_out) {
+    const int N = static_cast<int>(grad_out.dim(0));
+    const int Cout = static_cast<int>(grad_out.dim(1));
+    const int Hout = static_cast<int>(grad_out.dim(2));
+    const int Wout = static_cast<int>(grad_out.dim(3));
+    const int Ncol = N * Hout * Wout;
+
+    std::vector<float> GO;
+    grad_out.download(GO);
+    std::vector<float> GY(static_cast<std::size_t>(Ncol) * Cout);
+    for (int p = 0; p < Ncol; ++p) {
+        const int ow = p % Wout;
+        const int oh = (p / Wout) % Hout;
+        const int n = p / (Wout * Hout);
+        for (int co = 0; co < Cout; ++co) {
+            GY[static_cast<std::size_t>(p) * Cout + co] =
+                GO[((static_cast<std::size_t>(n) * Cout + co) * Hout + oh) * Wout + ow];
+        }
+    }
+
+    Tensor out(dev, {Ncol, Cout});
+    out.upload(GY);
+    return out;
+}
+
+Tensor im2col(Device& dev, const Tensor& x, int KH, int KW, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int Cin = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Hout = (H + 2 * padding - KH) / stride + 1;
+    const int Wout = (W + 2 * padding - KW) / stride + 1;
+    const int Kcol = Cin * KH * KW;
+    const int Ncol = N * Hout * Wout;
+
+    std::vector<float> X;
+    x.download(X);
+    std::vector<float> COL(static_cast<std::size_t>(Kcol) * Ncol, 0.0f);
+
+    for (int n = 0; n < N; ++n) {
+        for (int oh = 0; oh < Hout; ++oh) {
+            for (int ow = 0; ow < Wout; ++ow) {
+                const int p = (n * Hout + oh) * Wout + ow;
+                for (int ci = 0; ci < Cin; ++ci) {
+                    for (int kh = 0; kh < KH; ++kh) {
+                        const int ih = oh * stride - padding + kh;
+                        if (ih < 0 || ih >= H) {
+                            continue;
+                        }
+                        for (int kw = 0; kw < KW; ++kw) {
+                            const int iw = ow * stride - padding + kw;
+                            if (iw < 0 || iw >= W) {
+                                continue;
+                            }
+                            const int k = (ci * KH + kh) * KW + kw;
+                            COL[static_cast<std::size_t>(k) * Ncol + p] =
+                                X[((static_cast<std::size_t>(n) * Cin + ci) * H + ih) * W + iw];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {Kcol, Ncol});
+    out.upload(COL);
+    return out;
+}
+
 }  // namespace opendll::cpu_ops

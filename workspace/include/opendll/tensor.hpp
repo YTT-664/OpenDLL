@@ -28,6 +28,9 @@ public:
     void download(std::vector<float>& out) const;
     void download(float* data) const;
 
+    // 返回共享底层 buffer 的 view（改 shape，numel 不变）。
+    Tensor view(std::vector<int64_t> shape) const;
+
 private:
     Device* device_ = nullptr;
     std::vector<int64_t> shape_;

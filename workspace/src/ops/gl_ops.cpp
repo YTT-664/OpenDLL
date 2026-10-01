@@ -444,6 +444,264 @@ void main() {
 }
 )";
 
+// in-place SGD 更新：p -= lr * g。
+const char* kSgdUpdateSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Pb { float p[]; };
+layout(std430, binding = 1) buffer Gb { float g[]; };
+layout(std430, binding = 2) buffer Params { float lr; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < p.length()) {
+        p[idx] -= lr * g[idx];
+    }
+}
+)";
+
+// conv2d 反向：对输入梯度。
+const char* kConv2dGradInputSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer Wb { float w[]; };
+layout(std430, binding = 2) buffer GXb { float gx[]; };
+layout(std430, binding = 3) buffer Params {
+    int N, Cin, Cout, H, Wd, Hout, Wout, KH, KW, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * Cin * H * Wd;
+    if (int(idx) >= total) return;
+    int iw = int(idx) % Wd;
+    int ih = (int(idx) / Wd) % H;
+    int ci = (int(idx) / (Wd * H)) % Cin;
+    int n = int(idx) / (Wd * H * Cin);
+    float sum = 0.0;
+    for (int co = 0; co < Cout; ++co) {
+        for (int kh = 0; kh < KH; ++kh) {
+            int num_h = ih + pad - kh;
+            if (num_h % stride != 0) continue;
+            int oh = num_h / stride;
+            if (oh < 0 || oh >= Hout) continue;
+            for (int kw = 0; kw < KW; ++kw) {
+                int num_w = iw + pad - kw;
+                if (num_w % stride != 0) continue;
+                int ow = num_w / stride;
+                if (ow < 0 || ow >= Wout) continue;
+                sum += go[((n * Cout + co) * Hout + oh) * Wout + ow]
+                     * w[((co * Cin + ci) * KH + kh) * KW + kw];
+            }
+        }
+    }
+    gx[idx] = sum;
+}
+)";
+
+// conv2d 反向：对权重梯度。
+const char* kConv2dGradWeightSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer Xb { float x[]; };
+layout(std430, binding = 2) buffer GWb { float gw[]; };
+layout(std430, binding = 3) buffer Params {
+    int N, Cin, Cout, H, Wd, Hout, Wout, KH, KW, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = Cout * Cin * KH * KW;
+    if (int(idx) >= total) return;
+    int kw = int(idx) % KW;
+    int kh = (int(idx) / KW) % KH;
+    int ci = (int(idx) / (KW * KH)) % Cin;
+    int co = int(idx) / (KW * KH * Cin);
+    float sum = 0.0;
+    for (int n = 0; n < N; ++n) {
+        for (int oh = 0; oh < Hout; ++oh) {
+            int ih = oh * stride - pad + kh;
+            if (ih < 0 || ih >= H) continue;
+            for (int ow = 0; ow < Wout; ++ow) {
+                int iw = ow * stride - pad + kw;
+                if (iw < 0 || iw >= Wd) continue;
+                sum += go[((n * Cout + co) * Hout + oh) * Wout + ow]
+                     * x[((n * Cin + ci) * H + ih) * Wd + iw];
+            }
+        }
+    }
+    gw[idx] = sum;
+}
+)";
+
+// conv2d 反向：对 bias 梯度。
+const char* kConv2dGradBiasSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer GBb { float gb[]; };
+layout(std430, binding = 2) buffer Params { int N; int Cout; int Hout; int Wout; };
+void main() {
+    uint co = gl_GlobalInvocationID.x;
+    if (int(co) >= Cout) return;
+    float sum = 0.0;
+    for (int n = 0; n < N; ++n) {
+        for (int oh = 0; oh < Hout; ++oh) {
+            for (int ow = 0; ow < Wout; ++ow) {
+                sum += go[((n * Cout + int(co)) * Hout + oh) * Wout + ow];
+            }
+        }
+    }
+    gb[co] = sum;
+}
+)";
+
+// batchnorm 反向第一步：每 channel 计算 sum(dy) 与 sum(dy*x_hat)，累加 grad_gamma/grad_beta。
+const char* kBnBackwardStatsSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer Xb { float x[]; };
+layout(std430, binding = 2) buffer Mb { float mean[]; };
+layout(std430, binding = 3) buffer Vb { float var[]; };
+layout(std430, binding = 4) buffer GGb { float gg[]; };
+layout(std430, binding = 5) buffer GBb { float gb[]; };
+layout(std430, binding = 6) buffer Stb { float stats[]; };
+layout(std430, binding = 7) buffer Params { int N; int C; int HW; float eps; };
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    if (int(c) >= C) return;
+    float inv_std = 1.0 / sqrt(var[c] + eps);
+    float sum_gy = 0.0;
+    float sum_gy_xhat = 0.0;
+    for (int n = 0; n < N; ++n) {
+        for (int i = 0; i < HW; ++i) {
+            int idx = (n * C + int(c)) * HW + i;
+            float xhat = (x[idx] - mean[c]) * inv_std;
+            float gy = go[idx];
+            sum_gy += gy;
+            sum_gy_xhat += gy * xhat;
+        }
+    }
+    gg[c] += sum_gy_xhat;
+    gb[c] += sum_gy;
+    stats[c] = sum_gy;
+    stats[C + c] = sum_gy_xhat;
+}
+)";
+
+// batchnorm 反向第二步：由统计量计算 grad_x。
+const char* kBnBackwardGradXSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer Xb { float x[]; };
+layout(std430, binding = 2) buffer Mb { float mean[]; };
+layout(std430, binding = 3) buffer Vb { float var[]; };
+layout(std430, binding = 4) buffer Gb { float gamma[]; };
+layout(std430, binding = 5) buffer Stb { float stats[]; };
+layout(std430, binding = 6) buffer GXb { float gx[]; };
+layout(std430, binding = 7) buffer Params { int N; int C; int HW; float eps; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * HW;
+    if (int(idx) >= total) return;
+    int c = (int(idx) / HW) % C;
+    float inv_std = 1.0 / sqrt(var[c] + eps);
+    float xhat = (x[idx] - mean[c]) * inv_std;
+    float gy = go[idx];
+    float sum_gy = stats[c];
+    float sum_gy_xhat = stats[C + c];
+    float M = float(N * HW);
+    gx[idx] = inv_std * gamma[c] * (gy - sum_gy / M - xhat * sum_gy_xhat / M);
+}
+)";
+
+// batchnorm 前向统计：每 channel 计算 batch mean 与 var（有偏方差）。
+const char* kBnForwardStatsSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Xb { float x[]; };
+layout(std430, binding = 1) buffer Mb { float mean[]; };
+layout(std430, binding = 2) buffer Vb { float var[]; };
+layout(std430, binding = 3) buffer Params { int N; int C; int HW; };
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    if (int(c) >= C) return;
+    float sum = 0.0;
+    float sum2 = 0.0;
+    for (int n = 0; n < N; ++n) {
+        for (int i = 0; i < HW; ++i) {
+            int idx = (n * C + int(c)) * HW + i;
+            sum += x[idx];
+            sum2 += x[idx] * x[idx];
+        }
+    }
+    float M = float(N * HW);
+    float mu = sum / M;
+    mean[c] = mu;
+    var[c] = sum2 / M - mu * mu;
+}
+)";
+
+// col2im：列矩阵 [Kcol, Ncol] 累加回 [N, Cin, H, W]。
+const char* kCol2imSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Colb { float col[]; };
+layout(std430, binding = 1) buffer GXb { float gx[]; };
+layout(std430, binding = 2) buffer Params {
+    int N, Cin, H, Wd, Hout, Wout, KH, KW, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * Cin * H * Wd;
+    if (int(idx) >= total) return;
+    int iw = int(idx) % Wd;
+    int ih = (int(idx) / Wd) % H;
+    int ci = (int(idx) / (Wd * H)) % Cin;
+    int n = int(idx) / (Wd * H * Cin);
+    int Kcol = Cin * KH * KW;
+    int Ncol = N * Hout * Wout;
+    float sum = 0.0;
+    for (int kh = 0; kh < KH; ++kh) {
+        int num_h = ih + pad - kh;
+        if (num_h % stride != 0) continue;
+        int oh = num_h / stride;
+        if (oh < 0 || oh >= Hout) continue;
+        for (int kw = 0; kw < KW; ++kw) {
+            int num_w = iw + pad - kw;
+            if (num_w % stride != 0) continue;
+            int ow = num_w / stride;
+            if (ow < 0 || ow >= Wout) continue;
+            int p = (n * Hout + oh) * Wout + ow;
+            int k = (ci * KH + kh) * KW + kw;
+            sum += col[k * Ncol + p];
+        }
+    }
+    gx[idx] = sum;
+}
+)";
+
+// grad_out 布局转换：[N, Cout, Hout, Wout] -> [Ncol, Cout]。
+const char* kGradOutReshapeSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };
+layout(std430, binding = 1) buffer GYb { float gy[]; };
+layout(std430, binding = 2) buffer Params { int Cout; int Hout; int Wout; int Ncol; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = Ncol * Cout;
+    if (int(idx) >= total) return;
+    int co = int(idx) % Cout;
+    int p = int(idx) / Cout;
+    int ow = p % Wout;
+    int oh = (p / Wout) % Hout;
+    int n = p / (Wout * Hout);
+    gy[idx] = go[((n * Cout + co) * Hout + oh) * Wout + ow];
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -464,6 +722,15 @@ struct Cache {
     std::unique_ptr<Kernel> cross_entropy_backward;
     std::unique_ptr<Kernel> transpose;
     std::unique_ptr<Kernel> sum_axis0;
+    std::unique_ptr<Kernel> sgd_update;
+    std::unique_ptr<Kernel> conv2d_grad_input;
+    std::unique_ptr<Kernel> conv2d_grad_weight;
+    std::unique_ptr<Kernel> conv2d_grad_bias;
+    std::unique_ptr<Kernel> bn_backward_stats;
+    std::unique_ptr<Kernel> bn_backward_gradx;
+    std::unique_ptr<Kernel> bn_fwd_stats;
+    std::unique_ptr<Kernel> col2im;
+    std::unique_ptr<Kernel> grad_out_reshape;
     std::unique_ptr<Buffer> params;        // matmul 的 {M, N, K}
     std::unique_ptr<Buffer> conv_params;   // conv2d naive 的 11 个 int
     std::unique_ptr<Buffer> linear_params; // linear 的 {M, K, N}（linear_gemm 复用）
@@ -472,6 +739,14 @@ struct Cache {
     std::unique_ptr<Buffer> pool_params;   // 9 个 int（maxpool/avgpool 复用）
     std::unique_ptr<Buffer> bn_params;     // 2 int + 1 float
     std::unique_ptr<Buffer> sm_params;     // 2 个 int（softmax/ce 复用）
+    std::unique_ptr<Buffer> sgd_params;    // 1 float（lr）
+    std::unique_ptr<Buffer> conv_bwd_params;   // 11 个 int（grad_input/grad_weight 复用）
+    std::unique_ptr<Buffer> conv_bias_params;  // 4 个 int
+    std::unique_ptr<Buffer> bn_fwd_params;     // 3 个 int（N, C, HW）
+    std::unique_ptr<Buffer> bn_bwd_params;     // 3 int + 1 float
+    std::unique_ptr<Buffer> bn_stats_buf;      // 2*C float（sum_gy / sum_gy_xhat）
+    std::unique_ptr<Buffer> col2im_params;     // 11 个 int
+    std::unique_ptr<Buffer> grad_reshape_params; // 4 个 int
     std::unique_ptr<Buffer> col_buf;          // im2col 中间缓冲
     std::size_t col_buf_capacity = 0;
 };
@@ -856,6 +1131,231 @@ Tensor sum_axis0(Device& dev, const Tensor& x) {
     const std::uint32_t gx = static_cast<std::uint32_t>((N + 255u) / 256u);
     dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
     return y;
+}
+
+void sgd_update(Tensor& param, const Tensor& grad, float lr) {
+    Device& dev = param.device();
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.sgd_update, kSgdUpdateSrc);
+    if (!cache.sgd_params) {
+        cache.sgd_params = dev.alloc(sizeof(float));
+    }
+    dev.main_queue().upload(*cache.sgd_params, &lr, sizeof(lr));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &param.buffer()}, {1u, &grad.buffer()}, {2u, cache.sgd_params.get()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((param.numel() + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+}
+
+Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
+                         const Tensor& w, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t Cin = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Cout = static_cast<std::int32_t>(w.dim(0));
+    const std::int32_t KH = static_cast<std::int32_t>(w.dim(2));
+    const std::int32_t KW = static_cast<std::int32_t>(w.dim(3));
+
+    // grad_col = W^T @ grad_Y^T = matmul(transpose(W), transpose(grad_Y))
+    Tensor grad_Y = grad_out_reshape(dev, grad_out);                 // [Ncol, Cout]
+    Tensor w_view = w.view({Cout, Cin * KH * KW});                   // [Cout, Kcol]
+    Tensor w_T = transpose(dev, w_view);                             // [Kcol, Cout]
+    Tensor grad_Y_T = transpose(dev, grad_Y);                        // [Cout, Ncol]
+    Tensor grad_col = matmul(dev, w_T, grad_Y_T);                    // [Kcol, Ncol]
+    return col2im(dev, grad_col, N, Cin, H, W, KH, KW, stride, padding);
+}
+
+Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          const Tensor& w, int stride, int padding) {
+    const std::int32_t Cin = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t Cout = static_cast<std::int32_t>(w.dim(0));
+    const std::int32_t KH = static_cast<std::int32_t>(w.dim(2));
+    const std::int32_t KW = static_cast<std::int32_t>(w.dim(3));
+
+    // grad_W^T = col @ grad_Y = matmul(im2col(x), grad_out_reshape(grad_out))
+    Tensor col = im2col(dev, x, KH, KW, stride, padding);            // [Kcol, Ncol]
+    Tensor grad_Y = grad_out_reshape(dev, grad_out);                 // [Ncol, Cout]
+    Tensor grad_W_T = matmul(dev, col, grad_Y);                      // [Kcol, Cout]
+    Tensor grad_W = transpose(dev, grad_W_T);                        // [Cout, Kcol]
+    return grad_W.view({Cout, Cin, KH, KW});
+}
+
+Tensor conv2d_grad_bias(Device& dev, const Tensor& grad_out) {
+    const std::int32_t N = static_cast<std::int32_t>(grad_out.dim(0));
+    const std::int32_t Cout = static_cast<std::int32_t>(grad_out.dim(1));
+    const std::int32_t Hout = static_cast<std::int32_t>(grad_out.dim(2));
+    const std::int32_t Wout = static_cast<std::int32_t>(grad_out.dim(3));
+
+    Tensor out(dev, {Cout});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.conv2d_grad_bias, kConv2dGradBiasSrc);
+    if (!cache.conv_bias_params) {
+        cache.conv_bias_params = dev.alloc(4 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[4] = {N, Cout, Hout, Wout};
+    dev.main_queue().upload(*cache.conv_bias_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &out.buffer()}, {2u, cache.conv_bias_params.get()}};
+    const std::uint32_t wg = (static_cast<std::uint32_t>(Cout) + 255u) / 256u;
+    dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+    return out;
+}
+
+Tensor batchnorm_backward(Device& dev, const Tensor& x, const Tensor& grad_out,
+                          const Tensor& gamma, const Tensor& mean, const Tensor& var,
+                          float eps, Tensor& grad_gamma, Tensor& grad_beta) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t HW = H * W;
+
+    Tensor out(dev, x.shape());
+    auto& cache = cache_for(dev);
+
+    if (!cache.bn_bwd_params) {
+        cache.bn_bwd_params = dev.alloc(3 * sizeof(std::int32_t) + sizeof(float));
+    }
+    if (!cache.bn_stats_buf) {
+        cache.bn_stats_buf = dev.alloc(2 * static_cast<std::size_t>(C) * sizeof(float));
+    }
+    struct BNParams {
+        std::int32_t N;
+        std::int32_t C;
+        std::int32_t HW;
+        float eps;
+    };
+    const BNParams p{N, C, HW, eps};
+    dev.main_queue().upload(*cache.bn_bwd_params, &p, sizeof(p));
+
+    // 第一步：统计 + 累加 grad_gamma/grad_beta
+    Kernel* k_stats = get_or_compile(dev, cache.bn_backward_stats, kBnBackwardStatsSrc);
+    {
+        const std::vector<BufferBinding> bindings = {
+            {0u, &grad_out.buffer()}, {1u, &x.buffer()}, {2u, &mean.buffer()},
+            {3u, &var.buffer()},      {4u, &grad_gamma.buffer()},
+            {5u, &grad_beta.buffer()}, {6u, cache.bn_stats_buf.get()},
+            {7u, cache.bn_bwd_params.get()},
+        };
+        const std::uint32_t wg = (static_cast<std::uint32_t>(C) + 255u) / 256u;
+        dev.main_queue().dispatch(*k_stats, wg, 1, 1, bindings);
+    }
+
+    // 第二步：计算 grad_x
+    Kernel* k_gradx = get_or_compile(dev, cache.bn_backward_gradx, kBnBackwardGradXSrc);
+    {
+        const std::vector<BufferBinding> bindings = {
+            {0u, &grad_out.buffer()}, {1u, &x.buffer()},   {2u, &mean.buffer()},
+            {3u, &var.buffer()},      {4u, &gamma.buffer()}, {5u, cache.bn_stats_buf.get()},
+            {6u, &out.buffer()},      {7u, cache.bn_bwd_params.get()},
+        };
+        const std::uint32_t total = static_cast<std::uint32_t>(N) * C * HW;
+        const std::uint32_t wg = (total + 255u) / 256u;
+        dev.main_queue().dispatch(*k_gradx, wg, 1, 1, bindings);
+    }
+
+    return out;
+}
+
+void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t HW = H * W;
+
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.bn_fwd_stats, kBnForwardStatsSrc);
+    if (!cache.bn_fwd_params) {
+        cache.bn_fwd_params = dev.alloc(3 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[3] = {N, C, HW};
+    dev.main_queue().upload(*cache.bn_fwd_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()},
+        {1u, &mean.buffer()},
+        {2u, &var.buffer()},
+        {3u, cache.bn_fwd_params.get()},
+    };
+    const std::uint32_t wg = (static_cast<std::uint32_t>(C) + 255u) / 256u;
+    dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+}
+
+Tensor col2im(Device& dev, const Tensor& col, int N, int Cin, int H, int W,
+              int KH, int KW, int stride, int padding) {
+    const std::int32_t Hout = (H + 2 * padding - KH) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - KW) / stride + 1;
+
+    Tensor out(dev, {N, Cin, H, W});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.col2im, kCol2imSrc);
+    if (!cache.col2im_params) {
+        cache.col2im_params = dev.alloc(11 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[11] = {N, Cin, H, W, Hout, Wout, KH, KW, stride, padding};
+    dev.main_queue().upload(*cache.col2im_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &col.buffer()}, {1u, &out.buffer()}, {2u, cache.col2im_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * Cin * H * W;
+    const std::uint32_t wg = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+    return out;
+}
+
+Tensor grad_out_reshape(Device& dev, const Tensor& grad_out) {
+    const std::int32_t N = static_cast<std::int32_t>(grad_out.dim(0));
+    const std::int32_t Cout = static_cast<std::int32_t>(grad_out.dim(1));
+    const std::int32_t Hout = static_cast<std::int32_t>(grad_out.dim(2));
+    const std::int32_t Wout = static_cast<std::int32_t>(grad_out.dim(3));
+    const std::int32_t Ncol = N * Hout * Wout;
+
+    Tensor out(dev, {Ncol, Cout});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.grad_out_reshape, kGradOutReshapeSrc);
+    if (!cache.grad_reshape_params) {
+        cache.grad_reshape_params = dev.alloc(4 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[4] = {Cout, Hout, Wout, Ncol};
+    dev.main_queue().upload(*cache.grad_reshape_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &out.buffer()}, {2u, cache.grad_reshape_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(Ncol) * Cout;
+    const std::uint32_t wg = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+    return out;
+}
+
+Tensor im2col(Device& dev, const Tensor& x, int KH, int KW, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t Cin = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Hout = (H + 2 * padding - KH) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - KW) / stride + 1;
+    const std::int32_t Kcol = Cin * KH * KW;
+    const std::int32_t Ncol = N * Hout * Wout;
+
+    Tensor col(dev, {Kcol, Ncol});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.im2col, kIm2colSrc);
+    if (!cache.im2col_params) {
+        cache.im2col_params = dev.alloc(10 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[10] = {N, Cin, H, W, Hout, Wout, KH, KW, stride, padding};
+    dev.main_queue().upload(*cache.im2col_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &x.buffer()}, {1u, &col.buffer()}, {2u, cache.im2col_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(Kcol) * Ncol;
+    const std::uint32_t wg = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, wg, 1, 1, bindings);
+    return col;
 }
 
 }  // namespace opendll::gl_ops

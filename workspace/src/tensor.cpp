@@ -41,4 +41,19 @@ void Tensor::download(float* data) const {
     device_->main_queue().download(*buffer_, data, numel() * sizeof(float));
 }
 
+Tensor Tensor::view(std::vector<int64_t> shape) const {
+    std::size_t n = 1;
+    for (auto d : shape) {
+        n *= static_cast<std::size_t>(d);
+    }
+    if (n != numel()) {
+        throw std::invalid_argument("Tensor::view size mismatch");
+    }
+    Tensor t;
+    t.device_ = device_;
+    t.shape_ = std::move(shape);
+    t.buffer_ = buffer_;
+    return t;
+}
+
 }  // namespace opendll

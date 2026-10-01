@@ -297,6 +297,54 @@ M0 时 `OpenGLBuffer` / `OpenGLKernel` 析构**未调用 `glDeleteBuffers` / `gl
 
 修复后 **4060 比集显快 1.78×**。修复前 4060 反而慢是内存泄漏假象（PCIe 传输 + 换页开销掩盖了算力优势）。
 
-### 下一步（M4）
+## M4 — ResNet18 端到端训练（收敛）
 
-复现 ResNet18（conv + batchnorm + 残差连接 + global avg pool）。
+> 日期：2026-10-01
+> 里程碑：M4
+
+### 目标
+
+在 M3 的 Module 层基础上补齐 ResNet 所需模块（Conv2d / BatchNorm2d / 残差连接），打通 conv 的反向传播，并让 ResNet18 在 CIFAR-10 子集上收敛。
+
+### 新增内容
+
+- **backward 算子**：`conv2d_grad_input` / `conv2d_grad_weight` / `conv2d_grad_bias`、`batchnorm_backward` + `bn_forward_stats`（CPU + OpenGL，diff 全绿）。
+- **Module 扩展**：`Conv2d`（He 初始化）、`BatchNorm2d`（running stats + train/eval 切换）、`Sequential`、`BasicBlock`、`ResNet18`。
+- **优化器**：`SGD` 改为设备端 in-place 更新（`sgd_update` kernel），避免逐 batch 下载/上传参数。
+- **数据加载**：`load_cifar10`（float32 bin 格式）。
+- **训练程序**：`examples/train_resnet.cpp`。
+
+### 关键设计
+
+- **conv 反向复用 im2col**：`grad_input` = col2im + GEMM，`grad_weight` = im2col + GEMM，`grad_bias` = 沿 batch 求和——与 forward 同一套 GEMM 基础件。
+- **BatchNorm 反向**：显式 `train(bool)` 切换；训练用 batch 统计，eval 用 running 统计（running 更新在 CPU 端，C 个元素开销可忽略）。
+- **残差梯度**：`add` 双路共享，`backward` 里 shortcut 支路（downsample 时）与主路梯度相加。
+- **静态计算图**：按 `cross_entropy_backward → fc → 各 BasicBlock 逆序 → conv1` 手动回传，沿用计划书「先静态图后 autograd」的演进路径。
+
+### ResNet18 结构（CIFAR 变体）
+
+conv1(3→64, 3×3, s1, p1) → bn1 → relu → layer1–4（BasicBlock ×[2,2,2,2]，channel 64/128/256/512）→ global avg pool → fc(512→num_classes)。CIFAR 输入 32×32，故 conv1 用 3×3 stride1、无 maxpool（不同于 ImageNet 的 7×7 s2）。
+
+### 收敛结果（3 类子集，batch 128，lr 0.01，5 epoch）
+
+| epoch | loss | test_acc |
+| --- | --- | --- |
+| 0 | 1.066 | 0.507 |
+| 1 | 0.980 | 0.552 |
+| 2 | 0.940 | 0.573 |
+| 3 | 0.910 | 0.596 |
+| 4 | 0.886 | 0.580 |
+
+loss 单调下降、准确率从 0.507 升至 0.596（3 类随机水平 0.333），反向传播梯度正确。
+
+### 学习率调参
+
+纯 SGD（无 momentum）下 `lr=0.1` 发散（loss 先降后升，最终 9.04），降到 `lr=0.01` 后稳定收敛。结论：完整 CIFAR-10 训练需为 SGD 补 momentum + weight decay（ResNet 标准配置）。
+
+### 待优化（速度）
+
+5 epoch 训练 1236s ≈ 2.1s/batch，瓶颈是每 batch 约 100+ dispatch（conv forward=im2col+GEMM、backward=col2im+3×GEMM，×17 个 conv）+ 每 batch 一次 `loss.download` 同步。后续方向：fused kernel、减少 dispatch、降低同步频率。
+
+### 下一步（M5）
+
+速度优化（fused kernel / 减少 dispatch）+ SGD momentum + 完整 CIFAR-10 训练。

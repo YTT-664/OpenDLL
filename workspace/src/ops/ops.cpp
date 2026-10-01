@@ -186,4 +186,95 @@ Tensor sum_axis0(Device& dev, const Tensor& x) {
     return cpu_ops::sum_axis0(dev, x);
 }
 
+void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        gl_ops::bn_forward_stats(dev, x, mean, var);
+        return;
+    }
+#endif
+    cpu_ops::bn_forward_stats(dev, x, mean, var);
+}
+
+void sgd_update(Tensor& param, const Tensor& grad, float lr) {
+    Device& dev = param.device();
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        gl_ops::sgd_update(param, grad, lr);
+        return;
+    }
+#endif
+    cpu_ops::sgd_update(param, grad, lr);
+}
+
+Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
+                         const Tensor& w, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::conv2d_grad_input(dev, grad_out, x, w, stride, padding);
+    }
+#endif
+    return cpu_ops::conv2d_grad_input(dev, grad_out, x, w, stride, padding);
+}
+
+Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          const Tensor& w, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::conv2d_grad_weight(dev, grad_out, x, w, stride, padding);
+    }
+#endif
+    return cpu_ops::conv2d_grad_weight(dev, grad_out, x, w, stride, padding);
+}
+
+Tensor conv2d_grad_bias(Device& dev, const Tensor& grad_out) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::conv2d_grad_bias(dev, grad_out);
+    }
+#endif
+    return cpu_ops::conv2d_grad_bias(dev, grad_out);
+}
+
+Tensor col2im(Device& dev, const Tensor& col, int N, int Cin, int H, int W,
+              int KH, int KW, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::col2im(dev, col, N, Cin, H, W, KH, KW, stride, padding);
+    }
+#endif
+    return cpu_ops::col2im(dev, col, N, Cin, H, W, KH, KW, stride, padding);
+}
+
+Tensor grad_out_reshape(Device& dev, const Tensor& grad_out) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::grad_out_reshape(dev, grad_out);
+    }
+#endif
+    return cpu_ops::grad_out_reshape(dev, grad_out);
+}
+
+Tensor im2col(Device& dev, const Tensor& x, int KH, int KW, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::im2col(dev, x, KH, KW, stride, padding);
+    }
+#endif
+    return cpu_ops::im2col(dev, x, KH, KW, stride, padding);
+}
+
+Tensor batchnorm_backward(Device& dev, const Tensor& x, const Tensor& grad_out,
+                          const Tensor& gamma, const Tensor& mean, const Tensor& var,
+                          float eps, Tensor& grad_gamma, Tensor& grad_beta) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::batchnorm_backward(dev, x, grad_out, gamma, mean, var, eps, grad_gamma,
+                                          grad_beta);
+    }
+#endif
+    return cpu_ops::batchnorm_backward(dev, x, grad_out, gamma, mean, var, eps, grad_gamma,
+                                       grad_beta);
+}
+
 }  // namespace opendll

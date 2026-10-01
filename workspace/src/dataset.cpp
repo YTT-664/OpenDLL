@@ -63,4 +63,42 @@ Dataset load_mnist(const std::string& images_path, const std::string& labels_pat
     return ds;
 }
 
+Dataset load_cifar10(const std::string& images_path, const std::string& labels_path,
+                     int channels, int rows, int cols) {
+    const std::size_t pixels = static_cast<std::size_t>(channels) * rows * cols;
+
+    std::ifstream fi(images_path, std::ios::binary);
+    if (!fi) {
+        throw std::runtime_error("cannot open file: " + images_path);
+    }
+    fi.seekg(0, std::ios::end);
+    const std::streamsize size = fi.tellg();
+    fi.seekg(0, std::ios::beg);
+    const int num_images = static_cast<int>(size) / static_cast<std::streamsize>(pixels * sizeof(float));
+
+    Dataset ds;
+    ds.channels = channels;
+    ds.rows = rows;
+    ds.cols = cols;
+    ds.images.resize(static_cast<std::size_t>(num_images) * pixels);
+    ds.labels.resize(static_cast<std::size_t>(num_images));
+    fi.read(reinterpret_cast<char*>(ds.images.data()),
+            static_cast<std::streamsize>(ds.images.size() * sizeof(float)));
+
+    std::ifstream fl(labels_path, std::ios::binary);
+    if (!fl) {
+        throw std::runtime_error("cannot open file: " + labels_path);
+    }
+    std::vector<int> labels(static_cast<std::size_t>(num_images));
+    fl.read(reinterpret_cast<char*>(labels.data()),
+            static_cast<std::streamsize>(num_images * sizeof(int)));
+
+    ds.num_classes = 0;
+    for (std::size_t i = 0; i < ds.labels.size(); ++i) {
+        ds.labels[i] = labels[i];
+        ds.num_classes = std::max(ds.num_classes, labels[i] + 1);
+    }
+    return ds;
+}
+
 }  // namespace opendll

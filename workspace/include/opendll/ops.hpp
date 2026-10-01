@@ -58,4 +58,36 @@ Tensor transpose(Device& dev, const Tensor& x);
 // 沿第 0 维求和：[M, N] -> [N]
 Tensor sum_axis0(Device& dev, const Tensor& x);
 
+// 计算 batch mean / var（batchnorm 训练模式）。x: [N, C, H, W] -> mean[C], var[C]（有偏方差）
+void bn_forward_stats(Device& dev, const Tensor& x, Tensor& mean, Tensor& var);
+
+// in-place SGD 更新：param -= lr * grad（在设备端执行，避免逐 batch 下载/上传参数）
+void sgd_update(Tensor& param, const Tensor& grad, float lr);
+
+// ---- conv2d 反向（naive）----
+// grad_x: 对输入的梯度，shape 同 x [N, Cin, H, W]
+Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
+                         const Tensor& w, int stride, int padding);
+// grad_w: 对权重的梯度，shape 同 w [Cout, Cin, KH, KW]
+Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          const Tensor& w, int stride, int padding);
+// grad_b: 对 bias 的梯度，[Cout]
+Tensor conv2d_grad_bias(Device& dev, const Tensor& grad_out);
+
+// col2im：把列矩阵 col [Kcol, Ncol] 累加映射回 [N, Cin, H, W]（im2col 的逆）
+Tensor col2im(Device& dev, const Tensor& col, int N, int Cin, int H, int W,
+              int KH, int KW, int stride, int padding);
+
+// 布局转换：grad_out [N, Cout, Hout, Wout] -> [Ncol, Cout]（Ncol = N*Hout*Wout）
+Tensor grad_out_reshape(Device& dev, const Tensor& grad_out);
+
+// im2col：x [N, Cin, H, W] -> col [Kcol, Ncol]，Kcol = Cin*KH*KW，Ncol = N*Hout*Wout
+Tensor im2col(Device& dev, const Tensor& x, int KH, int KW, int stride, int padding);
+
+// ---- batchnorm 反向 ----
+// 返回 grad_x；同时把 grad_gamma / grad_beta 累加到对应张量。
+Tensor batchnorm_backward(Device& dev, const Tensor& x, const Tensor& grad_out,
+                          const Tensor& gamma, const Tensor& mean, const Tensor& var,
+                          float eps, Tensor& grad_gamma, Tensor& grad_beta);
+
 }  // namespace opendll

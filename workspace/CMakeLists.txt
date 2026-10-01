@@ -50,6 +50,9 @@ add_test(NAME test_ops COMMAND test_ops)
 add_executable(train_mlp examples/train_mlp.cpp)
 target_link_libraries(train_mlp PRIVATE opendll)
 
+add_executable(train_resnet examples/train_resnet.cpp)
+target_link_libraries(train_resnet PRIVATE opendll)
+
 # GPU 独显测试（WGL_NV_gpu_affinity，仅 Windows）
 if(WIN32)
     add_executable(test_gpu examples/test_gpu.cpp)

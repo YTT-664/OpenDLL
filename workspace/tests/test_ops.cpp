@@ -462,6 +462,122 @@ int main() {
         all_ok = all_ok && ok;
     }
 
+    // ---- conv2d backward ----
+    {
+        const int64_t N = 1, Cin = 2, H = 8, W = 8;
+        const int64_t Cout = 3, KH = 3, KW = 3;
+        const int stride = 1, padding = 1;  // Hout=Wout=8
+        const auto X = random_floats(static_cast<std::size_t>(N * Cin * H * W), rng);
+        const auto Wt = random_floats(static_cast<std::size_t>(Cout * Cin * KH * KW), rng);
+        const auto GO = random_floats(static_cast<std::size_t>(N * Cout * H * W), rng);
+
+        Tensor x_cpu(*cpu, {N, Cin, H, W}), w_cpu(*cpu, {Cout, Cin, KH, KW}),
+            go_cpu(*cpu, {N, Cout, H, W});
+        x_cpu.upload(X);
+        w_cpu.upload(Wt);
+        go_cpu.upload(GO);
+        auto gx_cpu = conv2d_grad_input(*cpu, go_cpu, x_cpu, w_cpu, stride, padding);
+        auto gw_cpu = conv2d_grad_weight(*cpu, go_cpu, x_cpu, w_cpu, stride, padding);
+        auto gb_cpu = conv2d_grad_bias(*cpu, go_cpu);
+
+        Tensor x_gl(*gl, {N, Cin, H, W}), w_gl(*gl, {Cout, Cin, KH, KW}),
+            go_gl(*gl, {N, Cout, H, W});
+        x_gl.upload(X);
+        w_gl.upload(Wt);
+        go_gl.upload(GO);
+        auto gx_gl = conv2d_grad_input(*gl, go_gl, x_gl, w_gl, stride, padding);
+        auto gw_gl = conv2d_grad_weight(*gl, go_gl, x_gl, w_gl, stride, padding);
+        auto gb_gl = conv2d_grad_bias(*gl, go_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        gx_cpu.download(a);
+        gx_gl.download(b);
+        float d = max_abs_diff(a, b);
+        bool ok = d < 1e-3f;
+        std::cout << "[conv2d_grad_input] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+
+        gw_cpu.download(a);
+        gw_gl.download(b);
+        d = max_abs_diff(a, b);
+        ok = d < 1e-3f;
+        std::cout << "[conv2d_grad_weight] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+
+        gb_cpu.download(a);
+        gb_gl.download(b);
+        d = max_abs_diff(a, b);
+        ok = d < 1e-3f;
+        std::cout << "[conv2d_grad_bias] max_abs_diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- batchnorm backward ----
+    {
+        const int64_t N = 2, C = 3, H = 4, W = 4;
+        const float eps = 1e-5f;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+        const auto GO = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+        const auto G = random_floats(static_cast<std::size_t>(C), rng);
+        const auto M = random_floats(static_cast<std::size_t>(C), rng);
+        std::vector<float> V(C);
+        for (int i = 0; i < C; ++i) {
+            V[i] = 0.5f + 0.2f * i;
+        }
+
+        Tensor x_cpu(*cpu, {N, C, H, W}), go_cpu(*cpu, {N, C, H, W}), g_cpu(*cpu, {C}),
+            m_cpu(*cpu, {C}), v_cpu(*cpu, {C});
+        Tensor gg_cpu(*cpu, {C}), gb_cpu(*cpu, {C});
+        x_cpu.upload(X);
+        go_cpu.upload(GO);
+        g_cpu.upload(G);
+        m_cpu.upload(M);
+        v_cpu.upload(V);
+        std::vector<float> zero(C, 0.0f);
+        gg_cpu.upload(zero);
+        gb_cpu.upload(zero);
+        auto gx_cpu = batchnorm_backward(*cpu, x_cpu, go_cpu, g_cpu, m_cpu, v_cpu, eps,
+                                         gg_cpu, gb_cpu);
+
+        Tensor x_gl(*gl, {N, C, H, W}), go_gl(*gl, {N, C, H, W}), g_gl(*gl, {C}),
+            m_gl(*gl, {C}), v_gl(*gl, {C});
+        Tensor gg_gl(*gl, {C}), gb_gl(*gl, {C});
+        x_gl.upload(X);
+        go_gl.upload(GO);
+        g_gl.upload(G);
+        m_gl.upload(M);
+        v_gl.upload(V);
+        gg_gl.upload(zero);
+        gb_gl.upload(zero);
+        auto gx_gl = batchnorm_backward(*gl, x_gl, go_gl, g_gl, m_gl, v_gl, eps, gg_gl, gb_gl);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        gx_cpu.download(a);
+        gx_gl.download(b);
+        float d = max_abs_diff(a, b);
+        bool ok = d < 1e-3f;
+        std::cout << "[batchnorm_backward] grad_x diff=" << d << (ok ? " PASS" : " FAIL") << "\n";
+        all_ok = all_ok && ok;
+
+        gg_cpu.download(a);
+        gg_gl.download(b);
+        d = max_abs_diff(a, b);
+        ok = d < 1e-3f;
+        std::cout << "[batchnorm_backward] grad_gamma diff=" << d << (ok ? " PASS" : " FAIL")
+                  << "\n";
+        all_ok = all_ok && ok;
+
+        gb_cpu.download(a);
+        gb_gl.download(b);
+        d = max_abs_diff(a, b);
+        ok = d < 1e-3f;
+        std::cout << "[batchnorm_backward] grad_beta diff=" << d << (ok ? " PASS" : " FAIL")
+                  << "\n";
+        all_ok = all_ok && ok;
+    }
+
     std::cout << (all_ok ? "ALL OPS PASSED" : "SOME OPS FAILED") << "\n";
     return all_ok ? 0 : 1;
 }
