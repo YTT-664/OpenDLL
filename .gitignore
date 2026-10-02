@@ -30,3 +30,6 @@ docs/OpenDLL-plan.md
 
 # ---- Datasets (kept local, not uploaded) ----
 data/
+
+# ---- Checkpoints (训练产物) ----
+*.ckpt
