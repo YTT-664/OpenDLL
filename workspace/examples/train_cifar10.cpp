@@ -10,158 +10,14 @@
 
 #include "opendll/dataset.hpp"
 #include "opendll/device.hpp"
-#include "opendll/module.hpp"
+#include "opendll/models/resnet.hpp"
 #include "opendll/ops.hpp"
 #include "opendll/optimizer.hpp"
+#include "opendll/state_dict.hpp"
 
 using namespace opendll;
 
 namespace {
-
-// ResNet18 的 BasicBlock（含 bn 的 train/eval 切换）。
-class BasicBlock final : public Module {
-public:
-    BasicBlock(Device& dev, int in_planes, int planes, int stride)
-        : dev_(dev),
-          conv1_(dev, in_planes, planes, 3, stride, 1),
-          bn1_(dev, planes),
-          relu1_(dev),
-          conv2_(dev, planes, planes, 3, 1, 1),
-          bn2_(dev, planes),
-          relu2_(dev),
-          downsample_(stride != 1 || in_planes != planes),
-          ds_conv_(dev, in_planes, planes, 1, stride, 0),
-          ds_bn_(dev, planes) {}
-
-    Tensor forward(const Tensor& x) override {
-        Tensor out = relu1_.forward(bn1_.forward(conv1_.forward(x)));
-        out = bn2_.forward(conv2_.forward(out));
-        Tensor shortcut = x;
-        if (downsample_) {
-            shortcut = ds_bn_.forward(ds_conv_.forward(x));
-        }
-        return relu2_.forward(add(dev_, out, shortcut));
-    }
-
-    Tensor backward(const Tensor& grad_out) override {
-        Tensor grad = relu2_.backward(grad_out);
-        Tensor grad_conv1_path = bn2_.backward(grad);
-        grad_conv1_path = conv2_.backward(grad_conv1_path);
-        grad_conv1_path = relu1_.backward(grad_conv1_path);
-        grad_conv1_path = bn1_.backward(grad_conv1_path);
-        Tensor grad_x = conv1_.backward(grad_conv1_path);
-
-        if (downsample_) {
-            Tensor grad_shortcut = ds_bn_.backward(grad);
-            grad_shortcut = ds_conv_.backward(grad_shortcut);
-            grad_x = add(dev_, grad_x, grad_shortcut);
-        }
-        return grad_x;
-    }
-
-    std::vector<std::pair<Tensor*, Tensor*>> parameters() override {
-        std::vector<std::pair<Tensor*, Tensor*>> p;
-        auto add_all = [&p](Module& m) {
-            auto mp = m.parameters();
-            p.insert(p.end(), mp.begin(), mp.end());
-        };
-        add_all(conv1_);
-        add_all(bn1_);
-        add_all(conv2_);
-        add_all(bn2_);
-        if (downsample_) {
-            add_all(ds_conv_);
-            add_all(ds_bn_);
-        }
-        return p;
-    }
-
-    void train_mode(bool on) {
-        bn1_.train(on);
-        bn2_.train(on);
-        if (downsample_) ds_bn_.train(on);
-    }
-
-private:
-    Device& dev_;
-    Conv2d conv1_, conv2_;
-    BatchNorm2d bn1_, bn2_;
-    ReLU relu1_, relu2_;
-    bool downsample_;
-    Conv2d ds_conv_;
-    BatchNorm2d ds_bn_;
-};
-
-struct ResNet {
-    Device& dev;
-    Conv2d conv1;
-    BatchNorm2d bn1;
-    ReLU relu;
-    std::vector<BasicBlock> layer1, layer2, layer3, layer4;
-    Linear fc;
-    int64_t last_H_ = 0, last_W_ = 0;  // layer4 输出的空间尺寸（供 avgpool backward 用）
-
-    ResNet(Device& d, int num_classes = 10)
-        : dev(d), conv1(d, 3, 64, 3, 1, 1), bn1(d, 64), relu(d), fc(d, 512, num_classes) {
-        make_layer(layer1, 64, 64, 2, 1);
-        make_layer(layer2, 64, 128, 2, 2);
-        make_layer(layer3, 128, 256, 2, 2);
-        make_layer(layer4, 256, 512, 2, 2);
-    }
-
-    void make_layer(std::vector<BasicBlock>& layer, int in_planes, int planes, int blocks,
-                    int stride) {
-        layer.emplace_back(dev, in_planes, planes, stride);
-        for (int i = 1; i < blocks; ++i) {
-            layer.emplace_back(dev, planes, planes, 1);
-        }
-    }
-
-    Tensor forward(const Tensor& x) {
-        Tensor out = relu.forward(bn1.forward(conv1.forward(x)));
-        for (auto& b : layer1) out = b.forward(out);
-        for (auto& b : layer2) out = b.forward(out);
-        for (auto& b : layer3) out = b.forward(out);
-        for (auto& b : layer4) out = b.forward(out);
-        last_H_ = out.dim(2);
-        last_W_ = out.dim(3);
-        out = avgpool2d(dev, out, static_cast<int>(last_H_), static_cast<int>(last_H_), 0);
-        out = out.view({out.dim(0), out.dim(1)});
-        return fc.forward(out);
-    }
-
-    Tensor backward(const Tensor& grad_out) {
-        Tensor grad = fc.backward(grad_out);
-        grad = grad.view({grad.dim(0), grad.dim(1), 1, 1});
-        // global avg pool 的 backward：把 [N,C,1,1] 广播回 [N,C,H,W]
-        grad = avgpool2d_backward(dev, grad, static_cast<int>(last_H_), static_cast<int>(last_W_));
-        for (auto it = layer4.rbegin(); it != layer4.rend(); ++it) grad = it->backward(grad);
-        for (auto it = layer3.rbegin(); it != layer3.rend(); ++it) grad = it->backward(grad);
-        for (auto it = layer2.rbegin(); it != layer2.rend(); ++it) grad = it->backward(grad);
-        for (auto it = layer1.rbegin(); it != layer1.rend(); ++it) grad = it->backward(grad);
-        grad = relu.backward(grad);
-        grad = bn1.backward(grad);
-        return conv1.backward(grad);
-    }
-
-    void collect(std::vector<Module*>& modules) {
-        modules.push_back(&conv1);
-        modules.push_back(&bn1);
-        for (auto& b : layer1) modules.push_back(&b);
-        for (auto& b : layer2) modules.push_back(&b);
-        for (auto& b : layer3) modules.push_back(&b);
-        for (auto& b : layer4) modules.push_back(&b);
-        modules.push_back(&fc);
-    }
-
-    void train_mode(bool on) {
-        bn1.train(on);
-        for (auto& b : layer1) b.train_mode(on);
-        for (auto& b : layer2) b.train_mode(on);
-        for (auto& b : layer3) b.train_mode(on);
-        for (auto& b : layer4) b.train_mode(on);
-    }
-};
 
 // 合并两个数据集，固定 seed 打乱，按 6:2:2 划分 train/val/test。
 void split_622(const Dataset& a, const Dataset& b, unsigned seed, Dataset& train,
@@ -202,7 +58,7 @@ void split_622(const Dataset& a, const Dataset& b, unsigned seed, Dataset& train
     pick(n_train + n_val, total, test);
 }
 
-float evaluate(Device& dev, const Dataset& data, ResNet& net, int batch_size) {
+float evaluate(Device& dev, const Dataset& data, ResNet18& net, int batch_size) {
     const int input_dim = data.channels * data.rows * data.cols;
     const int num_classes = data.num_classes;
     const int num = static_cast<int>(data.labels.size());
@@ -263,9 +119,8 @@ int main() {
     std::cout << "split 6:2:2 -> train " << train.labels.size() << " / val "
               << val.labels.size() << " / test " << test.labels.size() << "\n";
 
-    ResNet net(*dev, 10);
-    std::vector<Module*> modules;
-    net.collect(modules);
+    ResNet18 net(*dev, 32, 10);
+    std::vector<Module*> modules = {&net};
 
     const int batch_size = 128;
     const float base_lr = 0.001f;
@@ -275,6 +130,7 @@ int main() {
     const int num_train = static_cast<int>(train.labels.size());
     const int input_dim = train.channels * train.rows * train.cols;
     const int epochs = 10;
+    const std::string ckpt_path = "resnet18_cifar10.ckpt";
 
     float best_val_acc = -1.0f;
     int best_epoch = -1;
@@ -330,7 +186,7 @@ int main() {
         const float avg_loss = total_loss / static_cast<float>(num_batches);
         std::cout << "epoch " << epoch << "  loss=" << avg_loss;
 
-        // 每 2 epoch 在验证集上评估
+        // 每 2 epoch 在验证集上评估，并保存 checkpoint
         if ((epoch + 1) % 2 == 0 || epoch == epochs - 1) {
             net.train_mode(false);
             const float val_acc = evaluate(*dev, val, net, batch_size);
@@ -339,6 +195,8 @@ int main() {
                 best_val_acc = val_acc;
                 best_epoch = epoch;
             }
+            save_state_dict(ckpt_path, net.collect_state());
+            std::cout << "  [saved " << ckpt_path << "]";
         }
         std::cout << "\n";
     }
@@ -351,6 +209,14 @@ int main() {
     net.train_mode(false);
     const float test_acc = evaluate(*dev, test, net, batch_size);
     std::cout << "test_acc=" << test_acc << "\n";
+
+    // 端到端验证 checkpoint：用全新模型加载，test_acc 应与上面一致
+    ResNet18 loaded(*dev, 32, 10);
+    load_state_dict(ckpt_path, loaded.collect_state());
+    loaded.train_mode(false);
+    const float loaded_test_acc = evaluate(*dev, test, loaded, batch_size);
+    std::cout << "loaded checkpoint test_acc=" << loaded_test_acc
+              << (loaded_test_acc == test_acc ? "  (match)" : "  (MISMATCH)") << "\n";
 
     return 0;
 }
