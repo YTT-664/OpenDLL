@@ -16,6 +16,7 @@ Tensor conv2d(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b,
 Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b);
 Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
 Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W);
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps);
 Tensor softmax(Device& dev, const Tensor& x);
@@ -29,6 +30,8 @@ void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_
                              const Tensor& batch_mean, const Tensor& batch_var,
                              float momentum);
 void sgd_update(Tensor& param, const Tensor& grad, float lr);
+void sgd_momentum_update(Tensor& param, const Tensor& grad, Tensor& velocity,
+                         float lr, float momentum);
 Tensor conv2d_grad_input(Device& dev, const Tensor& grad_out, const Tensor& x,
                          const Tensor& w, int stride, int padding);
 Tensor conv2d_grad_weight(Device& dev, const Tensor& grad_out, const Tensor& x,

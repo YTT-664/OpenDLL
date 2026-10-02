@@ -234,6 +234,29 @@ Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int paddi
     return out;
 }
 
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
+    const int N = static_cast<int>(grad_out.dim(0));
+    const int C = static_cast<int>(grad_out.dim(1));
+
+    std::vector<float> GO;
+    grad_out.download(GO);
+    std::vector<float> GX(static_cast<std::size_t>(N) * C * H * W, 0.0f);
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            const float v =
+                GO[static_cast<std::size_t>(n) * C + c] / static_cast<float>(H * W);
+            for (int i = 0; i < H * W; ++i) {
+                GX[(static_cast<std::size_t>(n) * C + c) * H * W + i] = v;
+            }
+        }
+    }
+
+    Tensor out(dev, {N, C, H, W});
+    out.upload(GX);
+    return out;
+}
+
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps) {
     const int N = static_cast<int>(x.dim(0));
@@ -408,6 +431,20 @@ void sgd_update(Tensor& param, const Tensor& grad, float lr) {
         p[i] -= lr * g[i];
     }
     param.upload(p);
+}
+
+void sgd_momentum_update(Tensor& param, const Tensor& grad, Tensor& velocity,
+                         float lr, float momentum) {
+    std::vector<float> p, g, v;
+    param.download(p);
+    grad.download(g);
+    velocity.download(v);
+    for (std::size_t i = 0; i < p.size(); ++i) {
+        v[i] = momentum * v[i] + g[i];
+        p[i] -= lr * v[i];
+    }
+    param.upload(p);
+    velocity.upload(v);
 }
 
 void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,

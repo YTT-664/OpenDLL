@@ -478,6 +478,23 @@ void main() {
 }
 )";
 
+// SGDM（SGD with momentum）就地更新：v = momentum*v + grad; p -= lr*v。
+const char* kSgdMomentumSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer Pb { float p[]; };  // param
+layout(std430, binding = 1) buffer Gb { float g[]; };  // grad
+layout(std430, binding = 2) buffer Vb { float v[]; };  // velocity（就地）
+layout(std430, binding = 3) buffer Params { float lr; float momentum; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx < p.length()) {
+        v[idx] = momentum * v[idx] + g[idx];
+        p[idx] -= lr * v[idx];
+    }
+}
+)";
+
 // batchnorm running stats 的 EMA 更新（就地）：running = (1-momentum)*running + momentum*batch。
 const char* kBnUpdateRunningSrc = R"(
 #version 430 core
@@ -857,6 +874,24 @@ void main() {
 }
 )";
 
+// global avg pool 的 backward：grad_out [N, C, 1, 1] -> grad_in [N, C, H, W]，
+// 每个位置 = grad_out[n, c, 0, 0] / (H*W)。
+const char* kAvgPoolBackwardSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };  // [N, C, 1, 1]
+layout(std430, binding = 1) buffer GXb { float gx[]; };  // [N, C, H, W]
+layout(std430, binding = 2) buffer Params { int N; int C; int H; int Wd; };
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * H * Wd;
+    if (int(idx) >= total) return;
+    int c = (int(idx) / (H * Wd)) % C;
+    int n = int(idx) / (H * Wd * C);
+    gx[idx] = go[n * C + c] / float(H * Wd);
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -878,11 +913,13 @@ struct Cache {
     std::unique_ptr<Kernel> transpose;
     std::unique_ptr<Kernel> sum_axis0;
     std::unique_ptr<Kernel> sgd_update;
+    std::unique_ptr<Kernel> sgd_momentum;
     std::unique_ptr<Kernel> conv2d_grad_input;
     std::unique_ptr<Kernel> conv2d_grad_weight;
     std::unique_ptr<Kernel> conv2d_grad_bias;
     std::unique_ptr<Kernel> grad_input_gemm;
     std::unique_ptr<Kernel> grad_weight_gemm;
+    std::unique_ptr<Kernel> avgpool_backward;
     std::unique_ptr<Kernel> bn_backward_stats;
     std::unique_ptr<Kernel> bn_backward_gradx;
     std::unique_ptr<Kernel> bn_fwd_stats;
@@ -895,9 +932,11 @@ struct Cache {
     std::unique_ptr<Buffer> im2col_params;    // 10 个 int
     std::unique_ptr<Buffer> conv_gemm_params; // 6 个 int
     std::unique_ptr<Buffer> pool_params;   // 9 个 int（maxpool/avgpool 复用）
+    std::unique_ptr<Buffer> avgpool_bwd_params; // 4 个 int（N, C, H, W）
     std::unique_ptr<Buffer> bn_params;     // 2 int + 1 float
     std::unique_ptr<Buffer> sm_params;     // 2 个 int（softmax/ce 复用）
     std::unique_ptr<Buffer> sgd_params;    // 1 float（lr）
+    std::unique_ptr<Buffer> sgd_momentum_params; // 2 float（lr, momentum）
     std::unique_ptr<Buffer> conv_bwd_params;   // 11 个 int（grad_input/grad_weight 复用）
     std::unique_ptr<Buffer> conv_bias_params;  // 4 个 int
     std::unique_ptr<Buffer> grad_gemm_params;  // 3 个 int（grad_input/grad_weight GEMM 复用）
@@ -1134,6 +1173,27 @@ Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int paddi
     return y;
 }
 
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
+    const std::int32_t N = static_cast<std::int32_t>(grad_out.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(grad_out.dim(1));
+
+    Tensor out(dev, {N, C, H, W});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.avgpool_backward, kAvgPoolBackwardSrc);
+    if (!cache.avgpool_bwd_params) {
+        cache.avgpool_bwd_params = dev.alloc(4 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[4] = {N, C, H, W};
+    dev.main_queue().upload(*cache.avgpool_bwd_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &out.buffer()}, {2u, cache.avgpool_bwd_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * C * H * W;
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return out;
+}
+
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps) {
     const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
@@ -1304,6 +1364,27 @@ void sgd_update(Tensor& param, const Tensor& grad, float lr) {
 
     const std::vector<BufferBinding> bindings = {
         {0u, &param.buffer()}, {1u, &grad.buffer()}, {2u, cache.sgd_params.get()}};
+    const std::uint32_t gx = static_cast<std::uint32_t>((param.numel() + 255u) / 256u);
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+}
+
+void sgd_momentum_update(Tensor& param, const Tensor& grad, Tensor& velocity,
+                         float lr, float momentum) {
+    Device& dev = param.device();
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.sgd_momentum, kSgdMomentumSrc);
+    if (!cache.sgd_momentum_params) {
+        cache.sgd_momentum_params = dev.alloc(2 * sizeof(float));
+    }
+    const float params[2] = {lr, momentum};
+    dev.main_queue().upload(*cache.sgd_momentum_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &param.buffer()},
+        {1u, &grad.buffer()},
+        {2u, &velocity.buffer()},
+        {3u, cache.sgd_momentum_params.get()},
+    };
     const std::uint32_t gx = static_cast<std::uint32_t>((param.numel() + 255u) / 256u);
     dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
 }

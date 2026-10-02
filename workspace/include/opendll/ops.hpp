@@ -32,6 +32,10 @@ Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int paddi
 // 平均池化（正方形窗口），对窗口内有效（非 padding）元素取平均。
 Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
 
+// global avg pool 的 backward：grad_out [N, C, 1, 1] -> grad_in [N, C, H, W]，
+// 每个位置 = grad_out[n, c, 0, 0] / (H*W)。
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W);
+
 // 批归一化（给定均值/方差）。x: [N, C, H, W]，gamma/beta/mean/var: [C]。
 // y = (x - mean) / sqrt(var + eps) * gamma + beta
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
@@ -69,6 +73,11 @@ void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_
 
 // in-place SGD 更新：param -= lr * grad（在设备端执行，避免逐 batch 下载/上传参数）
 void sgd_update(Tensor& param, const Tensor& grad, float lr);
+
+// in-place SGDM（SGD with momentum）更新：v = momentum*v + grad; param -= lr*v。
+// velocity 需与 param 同 shape 且初始化为 0（设备端就地更新）。
+void sgd_momentum_update(Tensor& param, const Tensor& grad, Tensor& velocity,
+                         float lr, float momentum);
 
 // ---- conv2d 反向（naive）----
 // grad_x: 对输入的梯度，shape 同 x [N, Cin, H, W]

@@ -113,6 +113,15 @@ Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int paddi
     return cpu_ops::avgpool2d(dev, x, kernel, stride, padding);
 }
 
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::avgpool2d_backward(dev, grad_out, H, W);
+    }
+#endif
+    return cpu_ops::avgpool2d_backward(dev, grad_out, H, W);
+}
+
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps) {
     if (x.ndim() != 4) {
@@ -205,6 +214,18 @@ void sgd_update(Tensor& param, const Tensor& grad, float lr) {
     }
 #endif
     cpu_ops::sgd_update(param, grad, lr);
+}
+
+void sgd_momentum_update(Tensor& param, const Tensor& grad, Tensor& velocity,
+                         float lr, float momentum) {
+    Device& dev = param.device();
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        gl_ops::sgd_momentum_update(param, grad, velocity, lr, momentum);
+        return;
+    }
+#endif
+    cpu_ops::sgd_momentum_update(param, grad, velocity, lr, momentum);
 }
 
 void bn_update_running_stats(Device& dev, Tensor& running_mean, Tensor& running_var,
