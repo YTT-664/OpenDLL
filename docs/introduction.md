@@ -12,7 +12,7 @@ OpenDLL 是一个基于 **OpenGL compute shader** 的 C++17 深度学习库（�
 ┌─ 应用层   examples/train_resnet.cpp 等训练脚本
 ├─ 上层组件（本文） ──────────────────────────────
 │   Tensor     数据容器（shape / 上传下载 / view）
-│   Module 层  网络层（Linear / Conv2d / BatchNorm2d / ReLU / Sequential）
+│   Module 层  网络层（Linear / Conv2d / BatchNorm2d / ReLU / Pool / Sequential）
 │   Optimizer  参数更新（SGD / SGDM）
 │   Dataset    数据加载（MNIST / FashionMNIST / CIFAR-10）
 │   StateDict  权重存取（save_state_dict / load_state_dict）
@@ -60,6 +60,8 @@ class Module {
 | `Conv2d` | `(dev, in_c, out_c, kernel, stride, padding)` | 2D 卷积 + bias，He 初始化 |
 | `BatchNorm2d` | `(dev, num_features, eps, momentum)` | 批归一化，`train(bool)` 切换 batch/running 统计 |
 | `ReLU` | `(dev)` | 逐元素激活 |
+| `MaxPool2d` | `(dev, kernel, stride, padding)` | 2D 最大池化（无参数） |
+| `AvgPool2d` | `(dev, kernel, stride, padding)` | 2D 平均池化（无参数） |
 | `Sequential` | 无参，`add(shared_ptr<Module>)` | 顺序 forward / 逆序 backward |
 
 **自定义层**：继承 `Module` 实现三个接口即可。残差块 `BasicBlock` 就是这么做出来的——
