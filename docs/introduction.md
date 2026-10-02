@@ -13,7 +13,7 @@ OpenDLL 是一个基于 **OpenGL compute shader** 的 C++17 深度学习库（�
 ├─ 上层组件（本文） ──────────────────────────────
 │   Tensor     数据容器（shape / 上传下载 / view）
 │   Module 层  网络层（Linear / Conv2d / BatchNorm2d / ReLU / Sequential）
-│   Optimizer  参数更新（SGD）
+│   Optimizer  参数更新（SGD / SGDM）
 │   Dataset    数据加载（MNIST / FashionMNIST / CIFAR-10）
 ├─ 算子层 ops   可微算子（matmul / conv2d / ... 及其 backward）
 └─ 设备层 device  Device / CommandQueue / Buffer / Kernel 后端抽象
@@ -68,15 +68,26 @@ class Module {
 
 `include/opendll/optimizer.hpp`
 
-当前提供朴素 `SGD`（无 momentum，`param -= lr * grad`）。更新在**设备端就地完成**
-（不逐 batch 下载/上传参数）：
+提供两个优化器，更新都在**设备端就地完成**（不逐 batch 下载/上传参数）：
+
+| 优化器 | 更新规则 | 说明 |
+| --- | --- | --- |
+| `SGD` | `param -= lr * grad` | 朴素 SGD，无 momentum |
+| `SGDM` | `v = momentum*v + grad; param -= lr*v` | SGD with momentum，惰性为每个参数维护 velocity |
 
 ```cpp
-SGD sgd(lr / batch_size);     // 配合「梯度未平均」的语义
+SGDM sgd(lr_mean / batch_size, 0.9f);   // 见下方 lr 语义说明
 std::vector<Module*> modules;
 // ... 把网络各层塞进 modules ...
-sgd.step(modules);            // 对每个 (param, grad) 就地 param -= lr * grad
+sgd.step(modules);                       // 对每个 (param, grad) 就地更新
+sgd.set_lr(new_lr);                      // 训练中可动态调 lr（配合 lr schedule）
 ```
+
+**lr 语义**：`cross_entropy` 返回逐样本 loss、`cross_entropy_backward` 返回**未平均**的梯度，
+所以传入优化器的 `lr` 应为「mean-loss 语义的学习率 ÷ batch_size」。例如希望 mean-loss 下
+`lr=0.01`，则 `SGDM(0.01f / 128, 0.9f)`。注意 momentum 会把稳态有效学习率放大到
+`lr_mean / (1 - momentum)`，因此无 weight decay 时建议 `lr_mean ≤ 1e-2`，并用 `set_lr`
+配合 step-decay 压住后期。
 
 ## Dataset —— 数据加载
 
