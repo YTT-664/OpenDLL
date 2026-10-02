@@ -16,6 +16,8 @@ add_library(opendll
     src/module.cpp
     src/optimizer.cpp
     src/dataset.cpp
+    src/state_dict.cpp
+    src/models/resnet.cpp
 )
 target_include_directories(opendll PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -42,6 +44,9 @@ target_link_libraries(smoke_test PRIVATE opendll)
 
 add_executable(test_ops tests/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE opendll)
+
+add_executable(test_state_dict tests/test_state_dict.cpp)
+target_link_libraries(test_state_dict PRIVATE opendll)
 
 add_test(NAME smoke_test COMMAND smoke_test)
 add_test(NAME test_ops COMMAND test_ops)

@@ -1,12 +1,20 @@
 #pragma once
 
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include "opendll/tensor.hpp"
 
 namespace opendll {
+
+// state_dict 的一条记录：命名的张量。is_buffer 标记非训练状态（如 bn 的 running stats）。
+struct StateEntry {
+    std::string name;
+    Tensor* tensor = nullptr;
+    bool is_buffer = false;
+};
 
 // Module 基类：forward 组合算子，backward 传播梯度（静态计算图、手动反向）。
 class Module {
@@ -17,6 +25,16 @@ public:
     virtual Tensor backward(const Tensor& grad_out) = 0;
     // 返回 (参数, 梯度) 对，供优化器更新。
     virtual std::vector<std::pair<Tensor*, Tensor*>> parameters() = 0;
+    // 收集 state_dict 条目（可训练参数 + running stats 等 buffer）。
+    // 默认返回空；叶子层（Linear/Conv2d/BatchNorm/Sequential）override 提供真实条目。
+    virtual std::vector<StateEntry> collect_state() { return {}; }
+
+    // 手动命名（state_dict 的 key 前缀，叶子层会追加 .weight/.bias 等后缀）。
+    void set_name(const std::string& name) { name_ = name; }
+    const std::string& name() const { return name_; }
+
+private:
+    std::string name_;
 };
 
 // 全连接层：y = x @ w^T + b。w: [out, in]，b: [out]。
@@ -27,6 +45,7 @@ public:
     Tensor forward(const Tensor& x) override;
     Tensor backward(const Tensor& grad_out) override;
     std::vector<std::pair<Tensor*, Tensor*>> parameters() override;
+    std::vector<StateEntry> collect_state() override;
 
     Tensor& weight() { return weight_; }
     Tensor& bias() { return bias_; }
@@ -48,6 +67,7 @@ public:
     Tensor forward(const Tensor& x) override;
     Tensor backward(const Tensor& grad_out) override;
     std::vector<std::pair<Tensor*, Tensor*>> parameters() override { return {}; }
+    std::vector<StateEntry> collect_state() override { return {}; }
 
 private:
     Device& dev_;
@@ -63,6 +83,7 @@ public:
     Tensor forward(const Tensor& x) override;
     Tensor backward(const Tensor& grad_out) override;
     std::vector<std::pair<Tensor*, Tensor*>> parameters() override;
+    std::vector<StateEntry> collect_state() override;
 
 private:
     Device& dev_;
@@ -83,6 +104,7 @@ public:
     Tensor forward(const Tensor& x) override;
     Tensor backward(const Tensor& grad_out) override;
     std::vector<std::pair<Tensor*, Tensor*>> parameters() override;
+    std::vector<StateEntry> collect_state() override;
 
     void train(bool on) { training_ = on; }
 
@@ -111,6 +133,7 @@ public:
     Tensor forward(const Tensor& x) override;
     Tensor backward(const Tensor& grad_out) override;
     std::vector<std::pair<Tensor*, Tensor*>> parameters() override;
+    std::vector<StateEntry> collect_state() override;
 
 private:
     std::vector<std::shared_ptr<Module>> modules_;

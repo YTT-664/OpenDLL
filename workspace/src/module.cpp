@@ -57,6 +57,11 @@ std::vector<std::pair<Tensor*, Tensor*>> Linear::parameters() {
     return {{&weight_, &grad_w_}, {&bias_, &grad_b_}};
 }
 
+std::vector<StateEntry> Linear::collect_state() {
+    return {{name() + ".weight", &weight_, false},
+            {name() + ".bias", &bias_, false}};
+}
+
 Tensor ReLU::forward(const Tensor& x) {
     input_ = x;
     return relu(dev_, x);
@@ -114,6 +119,11 @@ std::vector<std::pair<Tensor*, Tensor*>> Conv2d::parameters() {
     return {{&weight_, &grad_w_}, {&bias_, &grad_b_}};
 }
 
+std::vector<StateEntry> Conv2d::collect_state() {
+    return {{name() + ".weight", &weight_, false},
+            {name() + ".bias", &bias_, false}};
+}
+
 BatchNorm2d::BatchNorm2d(Device& dev, int num_features, float eps, float momentum)
     : dev_(dev),
       gamma_(dev, {num_features}),
@@ -162,6 +172,14 @@ std::vector<std::pair<Tensor*, Tensor*>> BatchNorm2d::parameters() {
     return {{&gamma_, &grad_gamma_}, {&beta_, &grad_beta_}};
 }
 
+std::vector<StateEntry> BatchNorm2d::collect_state() {
+    // gamma/beta 用 PyTorch 命名（weight/bias），running stats 作为 buffer
+    return {{name() + ".weight", &gamma_, false},
+            {name() + ".bias", &beta_, false},
+            {name() + ".running_mean", &running_mean_, true},
+            {name() + ".running_var", &running_var_, true}};
+}
+
 Sequential& Sequential::add(std::shared_ptr<Module> m) {
     modules_.push_back(std::move(m));
     return *this;
@@ -190,6 +208,15 @@ std::vector<std::pair<Tensor*, Tensor*>> Sequential::parameters() {
         params.insert(params.end(), p.begin(), p.end());
     }
     return params;
+}
+
+std::vector<StateEntry> Sequential::collect_state() {
+    std::vector<StateEntry> out;
+    for (auto& m : modules_) {
+        auto s = m->collect_state();
+        out.insert(out.end(), s.begin(), s.end());
+    }
+    return out;
 }
 
 }  // namespace opendll
