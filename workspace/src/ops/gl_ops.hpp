@@ -17,6 +17,10 @@ Tensor linear(Device& dev, const Tensor& x, const Tensor& w, const Tensor& b);
 Tensor maxpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
 Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int padding);
 Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W);
+Tensor maxpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding);
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding);
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps);
 Tensor softmax(Device& dev, const Tensor& x);

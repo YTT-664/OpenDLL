@@ -219,4 +219,22 @@ std::vector<StateEntry> Sequential::collect_state() {
     return out;
 }
 
+Tensor MaxPool2d::forward(const Tensor& x) {
+    input_ = x;
+    return maxpool2d(dev_, x, kernel_, stride_, padding_);
+}
+
+Tensor MaxPool2d::backward(const Tensor& grad_out) {
+    return maxpool2d_backward(dev_, grad_out, input_, kernel_, stride_, padding_);
+}
+
+Tensor AvgPool2d::forward(const Tensor& x) {
+    input_ = x;
+    return avgpool2d(dev_, x, kernel_, stride_, padding_);
+}
+
+Tensor AvgPool2d::backward(const Tensor& grad_out) {
+    return avgpool2d_backward(dev_, grad_out, input_, kernel_, stride_, padding_);
+}
+
 }  // namespace opendll

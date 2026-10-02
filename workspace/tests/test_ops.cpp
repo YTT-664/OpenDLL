@@ -265,6 +265,66 @@ int main() {
         all_ok = all_ok && ok;
     }
 
+    // ---- maxpool2d_backward ----
+    {
+        const int64_t N = 1, C = 2, H = 8, W = 8;
+        const int kernel = 3, stride = 2, padding = 1;
+        const int Hout = (H + 2 * padding - kernel) / stride + 1;
+        const int Wout = (W + 2 * padding - kernel) / stride + 1;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+        const auto GO = random_floats(static_cast<std::size_t>(N * C * Hout * Wout), rng);
+
+        Tensor x_cpu(*cpu, {N, C, H, W}), go_cpu(*cpu, {N, C, Hout, Wout});
+        x_cpu.upload(X);
+        go_cpu.upload(GO);
+        Tensor gx_cpu = maxpool2d_backward(*cpu, go_cpu, x_cpu, kernel, stride, padding);
+
+        Tensor x_gl(*gl, {N, C, H, W}), go_gl(*gl, {N, C, Hout, Wout});
+        x_gl.upload(X);
+        go_gl.upload(GO);
+        Tensor gx_gl = maxpool2d_backward(*gl, go_gl, x_gl, kernel, stride, padding);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        gx_cpu.download(a);
+        gx_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[maxpool2d_backward] max_abs_diff=" << d << (ok ? " PASS" : " FAIL")
+                  << "\n";
+        all_ok = all_ok && ok;
+    }
+
+    // ---- avgpool2d_backward（通用）----
+    {
+        const int64_t N = 1, C = 2, H = 8, W = 8;
+        const int kernel = 2, stride = 2, padding = 0;
+        const int Hout = (H + 2 * padding - kernel) / stride + 1;
+        const int Wout = (W + 2 * padding - kernel) / stride + 1;
+        const auto X = random_floats(static_cast<std::size_t>(N * C * H * W), rng);
+        const auto GO = random_floats(static_cast<std::size_t>(N * C * Hout * Wout), rng);
+
+        Tensor x_cpu(*cpu, {N, C, H, W}), go_cpu(*cpu, {N, C, Hout, Wout});
+        x_cpu.upload(X);
+        go_cpu.upload(GO);
+        Tensor gx_cpu = avgpool2d_backward(*cpu, go_cpu, x_cpu, kernel, stride, padding);
+
+        Tensor x_gl(*gl, {N, C, H, W}), go_gl(*gl, {N, C, Hout, Wout});
+        x_gl.upload(X);
+        go_gl.upload(GO);
+        Tensor gx_gl = avgpool2d_backward(*gl, go_gl, x_gl, kernel, stride, padding);
+        gl->synchronize();
+
+        std::vector<float> a, b;
+        gx_cpu.download(a);
+        gx_gl.download(b);
+        const float d = max_abs_diff(a, b);
+        const bool ok = d < 1e-4f;
+        std::cout << "[avgpool2d_backward] max_abs_diff=" << d << (ok ? " PASS" : " FAIL")
+                  << "\n";
+        all_ok = all_ok && ok;
+    }
+
     // ---- batchnorm2d ----
     {
         const int64_t N = 2, C = 3, H = 4, W = 4;

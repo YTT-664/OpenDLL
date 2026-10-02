@@ -124,6 +124,44 @@ private:
     bool training_ = true;
 };
 
+// 2D 最大池化（正方形窗口，无参数）。
+class MaxPool2d final : public Module {
+public:
+    MaxPool2d(Device& dev, int kernel, int stride, int padding)
+        : dev_(dev), kernel_(kernel), stride_(stride), padding_(padding) {}
+
+    Tensor forward(const Tensor& x) override;
+    Tensor backward(const Tensor& grad_out) override;
+    std::vector<std::pair<Tensor*, Tensor*>> parameters() override { return {}; }
+    std::vector<StateEntry> collect_state() override { return {}; }
+
+private:
+    Device& dev_;
+    int kernel_;
+    int stride_;
+    int padding_;
+    Tensor input_;  // 缓存 forward 输入（backward 重算 argmax 用）
+};
+
+// 2D 平均池化（正方形窗口，无参数）。
+class AvgPool2d final : public Module {
+public:
+    AvgPool2d(Device& dev, int kernel, int stride, int padding)
+        : dev_(dev), kernel_(kernel), stride_(stride), padding_(padding) {}
+
+    Tensor forward(const Tensor& x) override;
+    Tensor backward(const Tensor& grad_out) override;
+    std::vector<std::pair<Tensor*, Tensor*>> parameters() override { return {}; }
+    std::vector<StateEntry> collect_state() override { return {}; }
+
+private:
+    Device& dev_;
+    int kernel_;
+    int stride_;
+    int padding_;
+    Tensor input_;  // 缓存 forward 输入（backward 确定输出 shape 用）
+};
+
 // 顺序容器：按顺序 forward / 逆序 backward。
 class Sequential final : public Module {
 public:

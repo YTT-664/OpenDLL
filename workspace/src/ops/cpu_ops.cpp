@@ -257,6 +257,123 @@ Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
     return out;
 }
 
+Tensor maxpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Hout = (H + 2 * padding - kernel) / stride + 1;
+    const int Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    std::vector<float> X, GO;
+    x.download(X);
+    grad_out.download(GO);
+    std::vector<float> GX(static_cast<std::size_t>(N) * C * H * W, 0.0f);
+
+    const float neg_inf = -std::numeric_limits<float>::infinity();
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int ih = 0; ih < H; ++ih) {
+                for (int iw = 0; iw < W; ++iw) {
+                    float g = 0.0f;
+                    for (int oh = 0; oh < Hout; ++oh) {
+                        const int kh_start = oh * stride - padding;
+                        if (ih < kh_start || ih >= kh_start + kernel) continue;
+                        for (int ow = 0; ow < Wout; ++ow) {
+                            const int kw_start = ow * stride - padding;
+                            if (iw < kw_start || iw >= kw_start + kernel) continue;
+                            // 找窗口内第一个最大值位置
+                            float maxv = neg_inf;
+                            int max_h = -1, max_w = -1;
+                            for (int kh = 0; kh < kernel; ++kh) {
+                                const int hh = kh_start + kh;
+                                if (hh < 0 || hh >= H) continue;
+                                for (int kw = 0; kw < kernel; ++kw) {
+                                    const int ww = kw_start + kw;
+                                    if (ww < 0 || ww >= W) continue;
+                                    const float v =
+                                        X[((static_cast<std::size_t>(n) * C + c) * H + hh) * W + ww];
+                                    if (v > maxv) {
+                                        maxv = v;
+                                        max_h = hh;
+                                        max_w = ww;
+                                    }
+                                }
+                            }
+                            if (max_h == ih && max_w == iw) {
+                                g += GO[((static_cast<std::size_t>(n) * C + c) * Hout + oh) * Wout + ow];
+                            }
+                        }
+                    }
+                    GX[((static_cast<std::size_t>(n) * C + c) * H + ih) * W + iw] = g;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, C, H, W});
+    out.upload(GX);
+    return out;
+}
+
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+    const int N = static_cast<int>(x.dim(0));
+    const int C = static_cast<int>(x.dim(1));
+    const int H = static_cast<int>(x.dim(2));
+    const int W = static_cast<int>(x.dim(3));
+    const int Hout = (H + 2 * padding - kernel) / stride + 1;
+    const int Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    std::vector<float> GO;
+    grad_out.download(GO);
+    std::vector<float> GX(static_cast<std::size_t>(N) * C * H * W, 0.0f);
+
+    // 预计算每个窗口的有效元素数（与 forward 一致）
+    std::vector<int> cnt(static_cast<std::size_t>(Hout) * Wout);
+    for (int oh = 0; oh < Hout; ++oh) {
+        for (int ow = 0; ow < Wout; ++ow) {
+            int c0 = 0;
+            for (int kh = 0; kh < kernel; ++kh) {
+                const int ih = oh * stride - padding + kh;
+                if (ih < 0 || ih >= H) continue;
+                for (int kw = 0; kw < kernel; ++kw) {
+                    const int iw = ow * stride - padding + kw;
+                    if (iw < 0 || iw >= W) continue;
+                    ++c0;
+                }
+            }
+            cnt[static_cast<std::size_t>(oh) * Wout + ow] = c0;
+        }
+    }
+
+    for (int n = 0; n < N; ++n) {
+        for (int c = 0; c < C; ++c) {
+            for (int ih = 0; ih < H; ++ih) {
+                for (int iw = 0; iw < W; ++iw) {
+                    float g = 0.0f;
+                    for (int oh = 0; oh < Hout; ++oh) {
+                        const int kh_start = oh * stride - padding;
+                        if (ih < kh_start || ih >= kh_start + kernel) continue;
+                        for (int ow = 0; ow < Wout; ++ow) {
+                            const int kw_start = ow * stride - padding;
+                            if (iw < kw_start || iw >= kw_start + kernel) continue;
+                            g += GO[((static_cast<std::size_t>(n) * C + c) * Hout + oh) * Wout + ow] /
+                                 static_cast<float>(cnt[static_cast<std::size_t>(oh) * Wout + ow]);
+                        }
+                    }
+                    GX[((static_cast<std::size_t>(n) * C + c) * H + ih) * W + iw] = g;
+                }
+            }
+        }
+    }
+
+    Tensor out(dev, {N, C, H, W});
+    out.upload(GX);
+    return out;
+}
+
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps) {
     const int N = static_cast<int>(x.dim(0));

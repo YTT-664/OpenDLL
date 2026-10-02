@@ -122,6 +122,26 @@ Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
     return cpu_ops::avgpool2d_backward(dev, grad_out, H, W);
 }
 
+Tensor maxpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::maxpool2d_backward(dev, grad_out, x, kernel, stride, padding);
+    }
+#endif
+    return cpu_ops::maxpool2d_backward(dev, grad_out, x, kernel, stride, padding);
+}
+
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+#ifdef OPENDLL_HAS_OPENGL
+    if (dev.info().backend == Backend::OpenGL) {
+        return gl_ops::avgpool2d_backward(dev, grad_out, x, kernel, stride, padding);
+    }
+#endif
+    return cpu_ops::avgpool2d_backward(dev, grad_out, x, kernel, stride, padding);
+}
+
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,
                    const Tensor& mean, const Tensor& var, float eps) {
     if (x.ndim() != 4) {

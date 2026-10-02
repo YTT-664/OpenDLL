@@ -36,6 +36,16 @@ Tensor avgpool2d(Device& dev, const Tensor& x, int kernel, int stride, int paddi
 // 每个位置 = grad_out[n, c, 0, 0] / (H*W)。
 Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W);
 
+// maxpool2d 的 backward（gather 版，重算窗口 argmax）。
+// grad_out [N,C,Hout,Wout] -> grad_in [N,C,H,W]，梯度只回传到每个窗口的最大值位置。
+Tensor maxpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding);
+
+// 通用 avgpool2d 的 backward：把 grad_out 平均分配回窗口内有效（非 padding）元素。
+// 与上面的 global avg pool 特化版重载。
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding);
+
 // 批归一化（给定均值/方差）。x: [N, C, H, W]，gamma/beta/mean/var: [C]。
 // y = (x - mean) / sqrt(var + eps) * gamma + beta
 Tensor batchnorm2d(Device& dev, const Tensor& x, const Tensor& gamma, const Tensor& beta,

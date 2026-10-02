@@ -892,6 +892,100 @@ void main() {
 }
 )";
 
+// maxpool2d 的 backward（gather 版）：梯度回传到每个窗口的第一个最大值位置。
+const char* kMaxPoolBackwardSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };  // [N,C,Hout,Wout]
+layout(std430, binding = 1) buffer Xb { float x[]; };    // [N,C,H,W]
+layout(std430, binding = 2) buffer GXb { float gx[]; };  // [N,C,H,W]
+layout(std430, binding = 3) buffer Params {
+    int N, C, H, Wd, Hout, Wout, KH, KW, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * H * Wd;
+    if (int(idx) >= total) return;
+    int iw = int(idx) % Wd;
+    int ih = (int(idx) / Wd) % H;
+    int c = (int(idx) / (Wd * H)) % C;
+    int n = int(idx) / (Wd * H * C);
+
+    float g = 0.0;
+    for (int oh = 0; oh < Hout; ++oh) {
+        int kh_start = oh * stride - pad;
+        if (ih < kh_start || ih >= kh_start + KH) continue;
+        for (int ow = 0; ow < Wout; ++ow) {
+            int kw_start = ow * stride - pad;
+            if (iw < kw_start || iw >= kw_start + KW) continue;
+            float maxv = -1.0e30;
+            int max_h = -1;
+            int max_w = -1;
+            for (int kh = 0; kh < KH; ++kh) {
+                int hh = kh_start + kh;
+                if (hh < 0 || hh >= H) continue;
+                for (int kw = 0; kw < KW; ++kw) {
+                    int ww = kw_start + kw;
+                    if (ww < 0 || ww >= Wd) continue;
+                    float v = x[((n * C + c) * H + hh) * Wd + ww];
+                    if (v > maxv) {
+                        maxv = v;
+                        max_h = hh;
+                        max_w = ww;
+                    }
+                }
+            }
+            if (max_h == ih && max_w == iw) {
+                g += go[((n * C + c) * Hout + oh) * Wout + ow];
+            }
+        }
+    }
+    gx[idx] = g;
+}
+)";
+
+// 通用 avgpool2d 的 backward（gather 版）：梯度平均分配回窗口内有效元素。
+const char* kAvgPoolBackwardGeneralSrc = R"(
+#version 430 core
+layout(local_size_x = 256) in;
+layout(std430, binding = 0) buffer GOb { float go[]; };  // [N,C,Hout,Wout]
+layout(std430, binding = 1) buffer GXb { float gx[]; };  // [N,C,H,W]
+layout(std430, binding = 2) buffer Params {
+    int N, C, H, Wd, Hout, Wout, KH, KW, stride, pad;
+};
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    int total = N * C * H * Wd;
+    if (int(idx) >= total) return;
+    int iw = int(idx) % Wd;
+    int ih = (int(idx) / Wd) % H;
+    int c = (int(idx) / (Wd * H)) % C;
+    int n = int(idx) / (Wd * H * C);
+
+    float g = 0.0;
+    for (int oh = 0; oh < Hout; ++oh) {
+        int kh_start = oh * stride - pad;
+        if (ih < kh_start || ih >= kh_start + KH) continue;
+        for (int ow = 0; ow < Wout; ++ow) {
+            int kw_start = ow * stride - pad;
+            if (iw < kw_start || iw >= kw_start + KW) continue;
+            int cnt = 0;
+            for (int kh = 0; kh < KH; ++kh) {
+                int hh = kh_start + kh;
+                if (hh < 0 || hh >= H) continue;
+                for (int kw = 0; kw < KW; ++kw) {
+                    int ww = kw_start + kw;
+                    if (ww < 0 || ww >= Wd) continue;
+                    ++cnt;
+                }
+            }
+            g += go[((n * C + c) * Hout + oh) * Wout + ow] / float(cnt);
+        }
+    }
+    gx[idx] = g;
+}
+)";
+
 // 每个 device 一份 kernel 缓存（M1 简化，M2 引入算子注册表后重构）。
 struct Cache {
     std::unique_ptr<Kernel> matmul;
@@ -920,6 +1014,8 @@ struct Cache {
     std::unique_ptr<Kernel> grad_input_gemm;
     std::unique_ptr<Kernel> grad_weight_gemm;
     std::unique_ptr<Kernel> avgpool_backward;
+    std::unique_ptr<Kernel> maxpool_backward;
+    std::unique_ptr<Kernel> avgpool_backward_general;
     std::unique_ptr<Kernel> bn_backward_stats;
     std::unique_ptr<Kernel> bn_backward_gradx;
     std::unique_ptr<Kernel> bn_fwd_stats;
@@ -933,6 +1029,7 @@ struct Cache {
     std::unique_ptr<Buffer> conv_gemm_params; // 6 个 int
     std::unique_ptr<Buffer> pool_params;   // 9 个 int（maxpool/avgpool 复用）
     std::unique_ptr<Buffer> avgpool_bwd_params; // 4 个 int（N, C, H, W）
+    std::unique_ptr<Buffer> pool_bwd_params;    // 10 个 int（N,C,H,W,Hout,Wout,KH,KW,stride,pad）
     std::unique_ptr<Buffer> bn_params;     // 2 int + 1 float
     std::unique_ptr<Buffer> sm_params;     // 2 个 int（softmax/ce 复用）
     std::unique_ptr<Buffer> sgd_params;    // 1 float（lr）
@@ -1188,6 +1285,59 @@ Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, int H, int W) {
 
     const std::vector<BufferBinding> bindings = {
         {0u, &grad_out.buffer()}, {1u, &out.buffer()}, {2u, cache.avgpool_bwd_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * C * H * W;
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return out;
+}
+
+Tensor maxpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Hout = (H + 2 * padding - kernel) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    Tensor out(dev, {N, C, H, W});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.maxpool_backward, kMaxPoolBackwardSrc);
+    if (!cache.pool_bwd_params) {
+        cache.pool_bwd_params = dev.alloc(10 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[10] = {N, C, H, W, Hout, Wout, kernel, kernel, stride, padding};
+    dev.main_queue().upload(*cache.pool_bwd_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &x.buffer()}, {2u, &out.buffer()},
+        {3u, cache.pool_bwd_params.get()}};
+    const std::uint32_t total = static_cast<std::uint32_t>(N) * C * H * W;
+    const std::uint32_t gx = (total + 255u) / 256u;
+    dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
+    return out;
+}
+
+Tensor avgpool2d_backward(Device& dev, const Tensor& grad_out, const Tensor& x,
+                          int kernel, int stride, int padding) {
+    const std::int32_t N = static_cast<std::int32_t>(x.dim(0));
+    const std::int32_t C = static_cast<std::int32_t>(x.dim(1));
+    const std::int32_t H = static_cast<std::int32_t>(x.dim(2));
+    const std::int32_t W = static_cast<std::int32_t>(x.dim(3));
+    const std::int32_t Hout = (H + 2 * padding - kernel) / stride + 1;
+    const std::int32_t Wout = (W + 2 * padding - kernel) / stride + 1;
+
+    Tensor out(dev, {N, C, H, W});
+    auto& cache = cache_for(dev);
+    Kernel* k = get_or_compile(dev, cache.avgpool_backward_general, kAvgPoolBackwardGeneralSrc);
+    if (!cache.pool_bwd_params) {
+        cache.pool_bwd_params = dev.alloc(10 * sizeof(std::int32_t));
+    }
+    const std::int32_t params[10] = {N, C, H, W, Hout, Wout, kernel, kernel, stride, padding};
+    dev.main_queue().upload(*cache.pool_bwd_params, params, sizeof(params));
+
+    const std::vector<BufferBinding> bindings = {
+        {0u, &grad_out.buffer()}, {1u, &out.buffer()}, {2u, cache.pool_bwd_params.get()}};
     const std::uint32_t total = static_cast<std::uint32_t>(N) * C * H * W;
     const std::uint32_t gx = (total + 255u) / 256u;
     dev.main_queue().dispatch(*k, gx, 1, 1, bindings);
